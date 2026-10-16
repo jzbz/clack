@@ -124,6 +124,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, r := range m.rows {
 			r.fl.step()
 		}
+		// Once a second, recompute row text so live ages keep counting.
+		// Unchanged text is a no-op; a changed digit flaps over.
+		if m.tick%20 == 0 {
+			m.retarget()
+		}
 		return m, tickFlap()
 	}
 	return m, nil

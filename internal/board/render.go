@@ -11,13 +11,16 @@ import (
 )
 
 var (
-	bgColor    = lipgloss.Color("#14141a")
+	bgColor    = lipgloss.Color("#161511")
 	textColor  = lipgloss.Color("#e8e3d5")
 	dimColor   = lipgloss.Color("#6f6a5c")
 	amberColor = lipgloss.Color("#ffb000")
 	greenColor = lipgloss.Color("#8fd07a")
 	redColor   = lipgloss.Color("#f26d6d")
 )
+
+// blinkPeriod is the on/off period of a BOARDING status, in flap ticks.
+const blinkPeriod = 12
 
 type colKind int
 
@@ -163,7 +166,7 @@ func rowText(r ghapi.Run, cols []column) string {
 	return b.String()
 }
 
-func styleFor(k colKind, r ghapi.Run, blinkOn bool) lipgloss.Style {
+func styleFor(k colKind, r ghapi.Run) lipgloss.Style {
 	base := lipgloss.NewStyle().Background(bgColor).Foreground(textColor)
 	switch k {
 	case colTime, colAge:
@@ -175,10 +178,7 @@ func styleFor(k colKind, r ghapi.Run, blinkOn bool) lipgloss.Style {
 		case "DEPARTED":
 			return base.Foreground(greenColor).Bold(true)
 		case "BOARDING":
-			if blinkOn {
-				return base.Foreground(amberColor).Bold(true)
-			}
-			return base.Foreground(amberColor)
+			return base.Foreground(amberColor).Bold(true)
 		case "CANCELLED":
 			return base.Foreground(redColor).Bold(true)
 		default:
@@ -195,7 +195,7 @@ func (m Model) renderRow(r *row, cols []column) string {
 	if m.width > 0 && len(cur) > m.width {
 		cur = cur[:m.width]
 	}
-	blinkOn := (m.tick/10)%2 == 0
+	blinkOn := (m.tick/blinkPeriod)%2 == 0
 	var b strings.Builder
 	pos := 0
 	for _, c := range cols {
@@ -203,20 +203,28 @@ func (m Model) renderRow(r *row, cols []column) string {
 			break
 		}
 		end := min(pos+c.width, len(cur))
-		b.WriteString(styleFor(c.kind, r.run, blinkOn).Render(string(cur[pos:end])))
+		seg := string(cur[pos:end])
+		// A BOARDING status blinks off entirely, like a real board.
+		if !blinkOn && c.kind == colStatus && statusWord(r.run) == "BOARDING" {
+			seg = strings.Repeat(" ", end-pos)
+		}
+		b.WriteString(styleFor(c.kind, r.run).Render(seg))
 		pos = end
 	}
-	if pad := m.width - pos; pad > 0 {
-		b.WriteString(lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", pad)))
-	}
+	b.WriteString(blankCells(m.width - pos))
 	return b.String()
 }
 
-func padLine(s string, width int) string {
-	if n := width - lipgloss.Width(s); n > 0 {
-		s += lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", n))
+// blankCells returns n board-background cells.
+func blankCells(n int) string {
+	if n <= 0 {
+		return ""
 	}
-	return s
+	return lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", n))
+}
+
+func padLine(s string, width int) string {
+	return s + blankCells(width-lipgloss.Width(s))
 }
 
 // View renders the whole board.
@@ -230,10 +238,21 @@ func (m Model) View() string {
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
 	b.WriteString(m.renderColHeader(cols))
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(strings.Repeat("─", m.width)))
 
+	// The panel keeps a fixed height: unused rows are blank flaps.
+	panel := m.maxRows
+	if limit := m.height - 7; limit > 0 && limit < panel {
+		panel = limit
+	}
 	rows := m.rows
-	if limit := m.height - 6; limit > 0 && len(rows) > limit {
-		rows = rows[:limit]
+	if len(rows) > panel {
+		rows = rows[:panel]
+	}
+	for _, r := range rows {
+		b.WriteString("\n")
+		b.WriteString(m.renderRow(r, cols))
 	}
 	if len(rows) == 0 {
 		b.WriteString("\n")
@@ -242,10 +261,11 @@ func (m Model) View() string {
 			msg = "  WAITING FOR FIRST POLL…"
 		}
 		b.WriteString(padLine(lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(msg), m.width))
+		rows = append(rows, nil) // one line spent on the message
 	}
-	for _, r := range rows {
+	for i := len(rows); i < panel; i++ {
 		b.WriteString("\n")
-		b.WriteString(m.renderRow(r, cols))
+		b.WriteString(blankCells(m.width))
 	}
 
 	b.WriteString("\n\n")
@@ -254,13 +274,12 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	title := lipgloss.NewStyle().Background(bgColor).Foreground(amberColor).Bold(true).
-		Render("CLACK · GITHUB ACTIONS DEPARTURES")
+	title := lipgloss.NewStyle().Background(bgColor).Foreground(amberColor).Bold(true).Render("CLACK") +
+		lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(" · GITHUB ACTIONS DEPARTURES")
 	clock := lipgloss.NewStyle().Background(bgColor).Foreground(textColor).Bold(true).
 		Render(time.Now().Format("15:04:05"))
 	gap := max(m.width-lipgloss.Width(title)-lipgloss.Width(clock), 1)
-	fill := lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", gap))
-	return title + fill + clock
+	return title + blankCells(gap) + clock
 }
 
 func (m Model) renderColHeader(cols []column) string {
