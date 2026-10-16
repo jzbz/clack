@@ -23,6 +23,7 @@ type Run struct {
 	Actor      string
 	Status     string // queued, requested, waiting, pending, in_progress, completed
 	Conclusion string // success, failure, cancelled, ... (empty until completed)
+	URL        string // html_url of the run
 	StartedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -107,6 +108,7 @@ type runsResponse struct {
 		HeadBranch   string     `json:"head_branch"`
 		Status       string     `json:"status"`
 		Conclusion   string     `json:"conclusion"`
+		HTMLURL      string     `json:"html_url"`
 		CreatedAt    time.Time  `json:"created_at"`
 		UpdatedAt    time.Time  `json:"updated_at"`
 		RunStartedAt *time.Time `json:"run_started_at"`
@@ -159,6 +161,7 @@ func (c *Client) fetchRepo(ctx context.Context, repo string) ([]Run, RateLimit, 
 			Actor:      wr.Actor.Login,
 			Status:     wr.Status,
 			Conclusion: wr.Conclusion,
+			URL:        wr.HTMLURL,
 			StartedAt:  started,
 			UpdatedAt:  wr.UpdatedAt,
 		})

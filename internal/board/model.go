@@ -8,7 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"clack/internal/ghapi"
+	"github.com/jzbz/clack/internal/ghapi"
 )
 
 // Fetcher polls every watched repo and returns the combined result.
@@ -25,16 +25,18 @@ type Model struct {
 	interval time.Duration
 	maxRows  int
 
-	rows     []*row
-	byID     map[int64]*row
-	polling  bool
-	lastPoll time.Time
-	rl       ghapi.RateLimit
-	err      error
-	failures int
-	tick     int64
-	width    int
-	height   int
+	rows       []*row
+	byID       map[int64]*row
+	selID      int64 // run ID of the highlighted row; 0 = none yet
+	polling    bool
+	nextPollAt time.Time
+	rl         ghapi.RateLimit
+	err        error
+	failures   int
+	tick       int64
+	width      int
+	height     int
+	showHelp   bool
 }
 
 // row is one board line, keyed by run ID so edits flap in place.
@@ -64,10 +66,11 @@ func New(fetch Fetcher, interval time.Duration, maxRows int) Model {
 type pollTickMsg struct{}
 type flapTickMsg struct{}
 type runsMsg ghapi.Result
+type browserMsg struct{ err error }
 
 // Init starts the first poll and the animation clock.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchCmd(), tickFlap())
+	return tea.Batch(m.fetchCmd(), tickFlap(), tea.SetWindowTitle("clack"))
 }
 
 func tickFlap() tea.Cmd {
@@ -92,11 +95,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
+		case "j", "down":
+			m.move(1)
+		case "k", "up":
+			m.move(-1)
+		case "o", "enter":
+			if r := m.selected(); r != nil && r.run.URL != "" {
+				url := r.run.URL
+				return m, func() tea.Msg { return browserMsg{openBrowser(url)} }
+			}
+		case "?":
+			m.showHelp = !m.showHelp
 		case "r":
 			if !m.polling {
 				m.polling = true
 				return m, m.fetchCmd()
 			}
+		}
+	case browserMsg:
+		if msg.err != nil {
+			m.err = msg.err
 		}
 	case pollTickMsg:
 		if !m.polling {
@@ -105,7 +123,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case runsMsg:
 		m.polling = false
-		m.lastPoll = time.Now()
 		res := ghapi.Result(msg)
 		if res.Err != nil {
 			m.err = res.Err
@@ -118,7 +135,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(res.Runs) > 0 {
 			m.merge(res.Runs)
 		}
-		return m, tea.Tick(m.nextPollIn(), func(time.Time) tea.Msg { return pollTickMsg{} })
+		delay := m.nextPollIn()
+		m.nextPollAt = time.Now().Add(delay)
+		return m, tea.Tick(delay, func(time.Time) tea.Msg { return pollTickMsg{} })
 	case flapTickMsg:
 		m.tick++
 		for _, r := range m.rows {
@@ -179,6 +198,48 @@ func (m *Model) merge(runs []ghapi.Run) {
 		}
 	}
 	m.rows = next
+	m.fixSelection()
+}
+
+// move shifts the selection by d rows, clamped to the board.
+func (m *Model) move(d int) {
+	if len(m.rows) == 0 {
+		return
+	}
+	i := min(max(m.selectedIndex()+d, 0), len(m.rows)-1)
+	m.selID = m.rows[i].id
+}
+
+// selectedIndex resolves selID to a row index, defaulting to the top row.
+func (m Model) selectedIndex() int {
+	for i, r := range m.rows {
+		if r.id == m.selID {
+			return i
+		}
+	}
+	return 0
+}
+
+// selected returns the highlighted row, or nil when the board is empty.
+func (m Model) selected() *row {
+	if len(m.rows) == 0 {
+		return nil
+	}
+	return m.rows[m.selectedIndex()]
+}
+
+// fixSelection keeps the selection on a surviving row after a merge.
+func (m *Model) fixSelection() {
+	if len(m.rows) == 0 {
+		m.selID = 0
+		return
+	}
+	for _, r := range m.rows {
+		if r.id == m.selID {
+			return
+		}
+	}
+	m.selID = m.rows[0].id
 }
 
 // retarget recomputes every row's target text after a resize.

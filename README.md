@@ -4,6 +4,10 @@ A GitHub Actions **departures board**: a live, cross-repo view of workflow
 runs styled like an airport split-flap display. `gh run watch` follows one
 run; clack shows everything at once.
 
+```sh
+go install github.com/jzbz/clack@latest
+```
+
 ```
 CLACK · GITHUB ACTIONS DEPARTURES                                              20:17:14
 TIME  REPO           WORKFLOW     BRANCH       ACTOR       STATUS     AGE
@@ -44,7 +48,8 @@ rows: 15
 per_repo: 5
 ```
 
-Keys: `r` poll now · `q` / `esc` / `ctrl+c` quit.
+Keys: `↑`/`k` `↓`/`j` select · `o`/`enter` open run in browser ·
+`r` poll now · `?` help · `q` quit.
 
 ## Rate limits
 

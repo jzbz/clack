@@ -1,4 +1,4 @@
-module clack
+module github.com/jzbz/clack
 
 go 1.27.1
 

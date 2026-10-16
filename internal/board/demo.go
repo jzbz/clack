@@ -2,9 +2,10 @@ package board
 
 import (
 	"context"
+	"fmt"
 	"time"
 
-	"clack/internal/ghapi"
+	"github.com/jzbz/clack/internal/ghapi"
 )
 
 // Demo returns a Fetcher that simulates a busy board without network access.
@@ -30,6 +31,7 @@ func Demo() Fetcher {
 			Actor:      actor,
 			Status:     status,
 			Conclusion: concl,
+			URL:        fmt.Sprintf("https://github.com/%s/actions/runs/%d", repo, id),
 			StartedAt:  start.Add(-ago),
 			UpdatedAt:  start.Add(-ago),
 		}

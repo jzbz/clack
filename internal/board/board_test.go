@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"clack/internal/ghapi"
+	"github.com/jzbz/clack/internal/ghapi"
 )
 
 func TestSortRuns(t *testing.T) {
@@ -56,8 +56,8 @@ func TestShortDur(t *testing.T) {
 		{0, "0S"},
 		{45 * time.Second, "45S"},
 		{59 * time.Second, "59S"},
-		{time.Minute, "1M"},
-		{12 * time.Minute, "12M"},
+		{time.Minute, "1M00S"},
+		{12*time.Minute + 5*time.Second, "12M05S"},
 		{time.Hour, "1H00M"},
 		{3*time.Hour + 4*time.Minute, "3H04M"},
 	}
@@ -106,5 +106,54 @@ func TestMergeKeepsRowIdentity(t *testing.T) {
 	m.merge([]ghapi.Run{{ID: 8, Status: "queued", StartedAt: time.Now()}})
 	if len(m.rows) != 1 || m.rows[0].id != 8 {
 		t.Fatalf("stale run not evicted: %+v", m.rows)
+	}
+}
+
+func TestSelection(t *testing.T) {
+	now := time.Now()
+	m := New(nil, time.Minute, 10)
+	m.width = 100
+	runs := []ghapi.Run{
+		{ID: 1, Status: "completed", Conclusion: "success", StartedAt: now},
+		{ID: 2, Status: "completed", Conclusion: "success", StartedAt: now.Add(-time.Hour)},
+	}
+	m.merge(runs)
+	if m.selID != 1 {
+		t.Fatalf("default selection = %d, want top row 1", m.selID)
+	}
+
+	m.move(1)
+	if m.selID != 2 {
+		t.Fatalf("after move(1) selID = %d, want 2", m.selID)
+	}
+	m.move(5)
+	if m.selID != 2 {
+		t.Fatalf("move past bottom: selID = %d, want clamped 2", m.selID)
+	}
+	m.move(-9)
+	if m.selID != 1 {
+		t.Fatalf("move past top: selID = %d, want clamped 1", m.selID)
+	}
+
+	// The selection follows its run when the board reorders.
+	m.move(1) // select run 2
+	m.merge([]ghapi.Run{
+		{ID: 2, Status: "completed", Conclusion: "success", StartedAt: now},
+		{ID: 1, Status: "completed", Conclusion: "success", StartedAt: now.Add(-time.Hour)},
+	})
+	if got := m.selected(); got == nil || got.id != 2 {
+		t.Fatalf("selection lost on reorder: got %+v, want run 2", got)
+	}
+
+	// When the selected run leaves the board, the top row takes over.
+	m.merge([]ghapi.Run{{ID: 9, Status: "queued", StartedAt: now}})
+	if m.selID != 9 {
+		t.Fatalf("selection after eviction = %d, want 9", m.selID)
+	}
+
+	// An empty board clears the selection.
+	m.merge(nil)
+	if m.selID != 0 || m.selected() != nil {
+		t.Fatalf("selection after empty merge: selID=%d selected=%+v", m.selID, m.selected())
 	}
 }

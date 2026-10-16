@@ -7,11 +7,12 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"clack/internal/ghapi"
+	"github.com/jzbz/clack/internal/ghapi"
 )
 
 var (
 	bgColor    = lipgloss.Color("#161511")
+	selBgColor = lipgloss.Color("#2b2618")
 	textColor  = lipgloss.Color("#e8e3d5")
 	dimColor   = lipgloss.Color("#6f6a5c")
 	amberColor = lipgloss.Color("#ffb000")
@@ -125,7 +126,7 @@ func ageOf(r ghapi.Run) time.Duration {
 	return time.Since(r.StartedAt)
 }
 
-// shortDur formats a duration in compact board style: 45S, 12M, 3H04M.
+// shortDur formats a duration in compact board style: 45S, 12M05S, 3H04M.
 func shortDur(d time.Duration) string {
 	if d < 0 {
 		d = 0
@@ -134,7 +135,7 @@ func shortDur(d time.Duration) string {
 	case d < time.Minute:
 		return fmt.Sprintf("%dS", int64(d/time.Second))
 	case d < time.Hour:
-		return fmt.Sprintf("%dM", int64(d/time.Minute))
+		return fmt.Sprintf("%dM%02dS", int64(d/time.Minute), int64(d/time.Second)%60)
 	default:
 		return fmt.Sprintf("%dH%02dM", int64(d/time.Hour), int64(d/time.Minute)%60)
 	}
@@ -166,8 +167,8 @@ func rowText(r ghapi.Run, cols []column) string {
 	return b.String()
 }
 
-func styleFor(k colKind, r ghapi.Run) lipgloss.Style {
-	base := lipgloss.NewStyle().Background(bgColor).Foreground(textColor)
+func styleFor(k colKind, r ghapi.Run, bg lipgloss.Color) lipgloss.Style {
+	base := lipgloss.NewStyle().Background(bg).Foreground(textColor)
 	switch k {
 	case colTime, colAge:
 		return base.Foreground(dimColor)
@@ -190,10 +191,14 @@ func styleFor(k colKind, r ghapi.Run) lipgloss.Style {
 }
 
 // renderRow slices the row's current flap text into styled column segments.
-func (m Model) renderRow(r *row, cols []column) string {
+func (m Model) renderRow(r *row, cols []column, selected bool) string {
 	cur := r.fl.cur
 	if m.width > 0 && len(cur) > m.width {
 		cur = cur[:m.width]
+	}
+	bg := bgColor
+	if selected {
+		bg = selBgColor
 	}
 	blinkOn := (m.tick/blinkPeriod)%2 == 0
 	var b strings.Builder
@@ -208,23 +213,23 @@ func (m Model) renderRow(r *row, cols []column) string {
 		if !blinkOn && c.kind == colStatus && statusWord(r.run) == "BOARDING" {
 			seg = strings.Repeat(" ", end-pos)
 		}
-		b.WriteString(styleFor(c.kind, r.run).Render(seg))
+		b.WriteString(styleFor(c.kind, r.run, bg).Render(seg))
 		pos = end
 	}
-	b.WriteString(blankCells(m.width - pos))
+	b.WriteString(blankCells(bg, m.width-pos))
 	return b.String()
 }
 
-// blankCells returns n board-background cells.
-func blankCells(n int) string {
+// blankCells returns n cells of board background.
+func blankCells(bg lipgloss.Color, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	return lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", n))
+	return lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", n))
 }
 
 func padLine(s string, width int) string {
-	return s + blankCells(width-lipgloss.Width(s))
+	return s + blankCells(bgColor, width-lipgloss.Width(s))
 }
 
 // View renders the whole board.
@@ -252,7 +257,7 @@ func (m Model) View() string {
 	}
 	for _, r := range rows {
 		b.WriteString("\n")
-		b.WriteString(m.renderRow(r, cols))
+		b.WriteString(m.renderRow(r, cols, r.id == m.selID))
 	}
 	if len(rows) == 0 {
 		b.WriteString("\n")
@@ -265,7 +270,7 @@ func (m Model) View() string {
 	}
 	for i := len(rows); i < panel; i++ {
 		b.WriteString("\n")
-		b.WriteString(blankCells(m.width))
+		b.WriteString(blankCells(bgColor, m.width))
 	}
 
 	b.WriteString("\n\n")
@@ -279,7 +284,7 @@ func (m Model) renderHeader() string {
 	clock := lipgloss.NewStyle().Background(bgColor).Foreground(textColor).Bold(true).
 		Render(time.Now().Format("15:04:05"))
 	gap := max(m.width-lipgloss.Width(title)-lipgloss.Width(clock), 1)
-	return title + blankCells(gap) + clock
+	return title + blankCells(bgColor, gap) + clock
 }
 
 func (m Model) renderColHeader(cols []column) string {
@@ -305,6 +310,12 @@ func (m Model) renderFooter() string {
 		b.WriteString("\n")
 	}
 
+	if m.showHelp {
+		help := "↑/K ↓/J SELECT · O/ENTER OPEN RUN · R REFRESH · ? CLOSE · Q QUIT"
+		b.WriteString(padLine(lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(help), m.width))
+		b.WriteString("\n")
+	}
+
 	left := fmt.Sprintf("POLL %s", m.interval)
 	if m.rl.Remaining >= 0 {
 		left += fmt.Sprintf(" · API %d LEFT", m.rl.Remaining)
@@ -314,15 +325,14 @@ func (m Model) renderFooter() string {
 	}
 	if m.polling {
 		left += " · POLLING…"
-	} else if !m.lastPoll.IsZero() {
-		left += " · UPDATED " + m.lastPoll.Format("15:04:05")
+	} else if !m.nextPollAt.IsZero() {
+		left += " · NEXT " + shortDur(time.Until(m.nextPollAt))
 	}
-	right := "R REFRESH · Q QUIT"
+	right := "O OPEN · ? HELP · Q QUIT"
 
 	leftSt := lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(left)
 	rightSt := lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(right)
 	gap := max(m.width-lipgloss.Width(leftSt)-lipgloss.Width(rightSt), 1)
-	fill := lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", gap))
-	b.WriteString(leftSt + fill + rightSt)
+	b.WriteString(leftSt + blankCells(bgColor, gap) + rightSt)
 	return b.String()
 }

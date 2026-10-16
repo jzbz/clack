@@ -14,8 +14,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"gopkg.in/yaml.v3"
 
-	"clack/internal/board"
-	"clack/internal/ghapi"
+	"github.com/jzbz/clack/internal/board"
+	"github.com/jzbz/clack/internal/ghapi"
 )
 
 const usage = `clack — GitHub Actions departures board
