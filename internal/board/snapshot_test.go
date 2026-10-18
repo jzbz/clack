@@ -1,7 +1,8 @@
 package board
 
 import (
-	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,9 @@ import (
 )
 
 var ansiRe = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
+
+// stripANSI reduces a rendered frame to the characters a terminal shows.
+func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
 // TestSnapshot renders real board frames into $CLACK_SNAPSHOT so the output
 // can be inspected without a terminal. Skipped unless the var is set.
@@ -26,34 +30,39 @@ func TestSnapshot(t *testing.T) {
 
 	fetch := Demo()
 	m := New(fetch, 2*time.Second, 12)
-	step := func(msg tea.Msg) {
-		um, _ := m.Update(msg)
-		m = um.(Model)
-	}
-	flaps := func(n int) {
-		for i := 0; i < n; i++ {
-			step(flapTickMsg{})
-		}
-	}
 	write := func(name string) {
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(ansiRe.ReplaceAllString(m.View(), "")), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(stripANSI(m.View())), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		t.Logf("wrote %s", path)
 	}
 
-	step(tea.WindowSizeMsg{Width: 110, Height: 30})
-	res := fetch(context.Background())
-	step(runsMsg(res))
-	flaps(10)
+	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
+	m = step(m, runsMsg(fetch(t.Context())))
+	m = frames(m, 10)
 	write("frame-mid.txt")
-	flaps(400)
+	m = frames(m, 400)
 	write("frame-settled.txt")
 
 	// Advance far enough that queued runs board and boarding runs depart.
-	for p := 0; p < 8; p++ {
-		step(runsMsg(fetch(context.Background())))
-		flaps(300)
+	for range 8 {
+		m = step(m, runsMsg(fetch(t.Context())))
+		m = frames(m, 300)
 	}
 	write("frame-later.txt")
+
+	// Narrow terminals drop columns rather than running off the edge.
+	for _, w := range []int{90, 70, 50} {
+		m = step(m, tea.WindowSizeMsg{Width: w, Height: 24})
+		m = frames(m, 400)
+		write(fmt.Sprintf("frame-w%d.txt", w))
+	}
+
+	// The help line and an error share the footer with the status line.
+	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
+	m.showHelp = true
+	m.err = errors.New("acme/ghost: 404 Not Found")
+	m = frames(m, 400)
+	write("frame-help.txt")
 }

@@ -2,8 +2,9 @@
 package board
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,8 +16,12 @@ import (
 type Fetcher func(ctx context.Context) ghapi.Result
 
 const (
-	flapInterval = 50 * time.Millisecond
+	animFrame    = 50 * time.Millisecond // repaint rate while flaps are moving
+	minFrame     = 10 * time.Millisecond // floor on a scheduled repaint
+	idleFrame    = time.Second           // a settled board still ticks its clock
+	minInterval  = 10 * time.Second
 	maxBackoff   = 5 * time.Minute
+	fetchTimeout = 30 * time.Second
 )
 
 // Model is the bubbletea model for the board.
@@ -33,94 +38,112 @@ type Model struct {
 	rl         ghapi.RateLimit
 	err        error
 	failures   int
-	tick       int64
 	width      int
 	height     int
 	showHelp   bool
+
+	now      time.Time // wall clock as of the current message; View reads only this
+	frame    int       // generation of the live frame clock
+	lastText int64     // unix second the row text was last recomputed
 }
 
 // row is one board line, keyed by run ID so edits flap in place.
 type row struct {
 	id  int64
 	run ghapi.Run
+	st  status
 	fl  flap
 }
 
 // New builds a Model polling with fetch every interval, showing maxRows runs.
 func New(fetch Fetcher, interval time.Duration, maxRows int) Model {
-	if interval < 10*time.Second {
-		interval = 10 * time.Second
-	}
-	if maxRows < 1 {
-		maxRows = 1
-	}
 	return Model{
 		fetch:    fetch,
-		interval: interval,
-		maxRows:  maxRows,
+		interval: max(interval, minInterval),
+		maxRows:  max(maxRows, 1),
 		byID:     map[int64]*row{},
 		rl:       ghapi.RateLimit{Remaining: -1},
+		now:      time.Now(),
 	}
 }
 
-type pollTickMsg struct{}
-type flapTickMsg struct{}
-type runsMsg ghapi.Result
-type browserMsg struct{ err error }
+type (
+	pollMsg    struct{}
+	frameMsg   struct{ gen int } // gen fences out ticks from a superseded schedule
+	runsMsg    ghapi.Result
+	browserMsg struct{ err error }
+)
 
-// Init starts the first poll and the animation clock.
+// Init starts the first poll and the frame clock.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchCmd(), tickFlap(), tea.SetWindowTitle("clack"))
+	return tea.Batch(m.fetchCmd(), frameIn(animFrame, m.frame), tea.SetWindowTitle("clack"))
 }
 
-func tickFlap() tea.Cmd {
-	return tea.Tick(flapInterval, func(time.Time) tea.Msg { return flapTickMsg{} })
+func frameIn(d time.Duration, gen int) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return frameMsg{gen} })
+}
+
+// nextFrameCmd schedules the next repaint in d and supersedes any frame tick
+// already in flight, so a fresh animation is never left running off an idle
+// timer. Every generation bump must come with a new tick or the clock stops.
+func (m *Model) nextFrameCmd(d time.Duration) tea.Cmd {
+	m.frame++
+	return frameIn(d, m.frame)
+}
+
+// nextFrame is how long the board may stand still: until a flap moves, a
+// BOARDING status blinks, or the clock ticks over to the next second. A
+// settled board therefore repaints once a second instead of twenty times.
+func (m Model) nextFrame() time.Duration {
+	boarding := false
+	for _, r := range m.rows {
+		if !r.fl.settled() {
+			return animFrame
+		}
+		boarding = boarding || r.st == statusBoarding
+	}
+	since := time.Duration(m.now.UnixNano())
+	d := idleFrame - since%idleFrame
+	if boarding {
+		d = min(d, blinkPeriod-since%blinkPeriod)
+	}
+	return max(d, minFrame)
 }
 
 func (m Model) fetchCmd() tea.Cmd {
+	fetch := m.fetch
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
-		return runsMsg(m.fetch(ctx))
+		return runsMsg(fetch(ctx))
 	}
 }
 
-// Update handles keys, poll results and the animation clock.
+// Update handles keys, poll results and the frame clock.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.now = time.Now()
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.retarget()
+		cmd := m.nextFrameCmd(animFrame)
+		return m, cmd
+
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c", "esc":
-			return m, tea.Quit
-		case "j", "down":
-			m.move(1)
-		case "k", "up":
-			m.move(-1)
-		case "o", "enter":
-			if r := m.selected(); r != nil && r.run.URL != "" {
-				url := r.run.URL
-				return m, func() tea.Msg { return browserMsg{openBrowser(url)} }
-			}
-		case "?":
-			m.showHelp = !m.showHelp
-		case "r":
-			if !m.polling {
-				m.polling = true
-				return m, m.fetchCmd()
-			}
-		}
+		return m.handleKey(msg)
+
 	case browserMsg:
 		if msg.err != nil {
 			m.err = msg.err
 		}
-	case pollTickMsg:
+
+	case pollMsg:
 		if !m.polling {
 			m.polling = true
 			return m, m.fetchCmd()
 		}
+
 	case runsMsg:
 		m.polling = false
 		res := ghapi.Result(msg)
@@ -132,23 +155,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.failures = 0
 		}
 		m.rl = res.RateLimit
-		if len(res.Runs) > 0 {
+		// A clean poll with no runs really does mean an empty board; a
+		// failed one keeps whatever was last known good.
+		if res.Err == nil || len(res.Runs) > 0 {
 			m.merge(res.Runs)
 		}
 		delay := m.nextPollIn()
-		m.nextPollAt = time.Now().Add(delay)
-		return m, tea.Tick(delay, func(time.Time) tea.Msg { return pollTickMsg{} })
-	case flapTickMsg:
-		m.tick++
+		m.nextPollAt = m.now.Add(delay)
+		poll := tea.Tick(delay, func(time.Time) tea.Msg { return pollMsg{} })
+		return m, tea.Batch(poll, m.nextFrameCmd(m.nextFrame()))
+
+	case frameMsg:
+		if msg.gen != m.frame {
+			return m, nil // superseded schedule
+		}
 		for _, r := range m.rows {
 			r.fl.step()
 		}
-		// Once a second, recompute row text so live ages keep counting.
+		// Ages count live, so recompute the row text once a second.
 		// Unchanged text is a no-op; a changed digit flaps over.
-		if m.tick%20 == 0 {
+		if sec := m.now.Unix(); sec != m.lastText {
+			m.lastText = sec
 			m.retarget()
 		}
-		return m, tickFlap()
+		cmd := m.nextFrameCmd(m.nextFrame())
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c", "esc":
+		return m, tea.Quit
+	case "j", "down":
+		m.move(1)
+	case "k", "up":
+		m.move(-1)
+	case "g", "home":
+		m.moveTo(0)
+	case "G", "end":
+		m.moveTo(len(m.rows) - 1)
+	case "o", "enter":
+		if r := m.selected(); r != nil && r.run.URL != "" {
+			url := r.run.URL
+			return m, func() tea.Msg { return browserMsg{openBrowser(url)} }
+		}
+	case "?":
+		m.showHelp = !m.showHelp
+	case "r":
+		if !m.polling {
+			m.polling = true
+			return m, m.fetchCmd()
+		}
 	}
 	return m, nil
 }
@@ -157,7 +216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // limit instead of hammering the API.
 func (m Model) nextPollIn() time.Duration {
 	if m.rl.Remaining == 0 {
-		if d := time.Until(m.rl.Reset) + 2*time.Second; d > 0 {
+		if d := m.rl.Reset.Sub(m.now) + 2*time.Second; d > 0 {
 			return d
 		}
 	}
@@ -165,10 +224,7 @@ func (m Model) nextPollIn() time.Duration {
 	for i := 0; i < m.failures && i < 4; i++ {
 		d *= 2
 	}
-	if d > maxBackoff {
-		d = maxBackoff
-	}
-	return d
+	return min(d, maxBackoff)
 }
 
 // merge folds freshly fetched runs into the board: sort, trim, then retarget
@@ -180,34 +236,41 @@ func (m *Model) merge(runs []ghapi.Run) {
 	}
 	cols := columns(m.width)
 	next := make([]*row, 0, len(runs))
-	seen := make(map[int64]bool, len(runs))
 	for _, rn := range runs {
-		seen[rn.ID] = true
 		r, ok := m.byID[rn.ID]
 		if !ok {
 			r = &row{id: rn.ID}
-			m.byID[rn.ID] = r
 		}
-		r.run = rn
-		r.fl.setTarget(rowText(rn, cols))
+		r.run, r.st = rn, statusOf(rn)
+		r.fl.setTarget(rowText(rn, r.st, cols, m.now))
 		next = append(next, r)
 	}
-	for id := range m.byID {
-		if !seen[id] {
-			delete(m.byID, id)
-		}
+	// Rebuild the index so runs that fell off the board are forgotten.
+	clear(m.byID)
+	for _, r := range next {
+		m.byID[r.id] = r
 	}
 	m.rows = next
 	m.fixSelection()
 }
 
+// retarget recomputes every row's target text, after a resize or as ages tick.
+func (m *Model) retarget() {
+	cols := columns(m.width)
+	for _, r := range m.rows {
+		r.fl.setTarget(rowText(r.run, r.st, cols, m.now))
+	}
+}
+
 // move shifts the selection by d rows, clamped to the board.
-func (m *Model) move(d int) {
+func (m *Model) move(d int) { m.moveTo(m.selectedIndex() + d) }
+
+// moveTo selects row i, clamped to the board.
+func (m *Model) moveTo(i int) {
 	if len(m.rows) == 0 {
 		return
 	}
-	i := min(max(m.selectedIndex()+d, 0), len(m.rows)-1)
-	m.selID = m.rows[i].id
+	m.selID = m.rows[min(max(i, 0), len(m.rows)-1)].id
 }
 
 // selectedIndex resolves selID to a row index, defaulting to the top row.
@@ -234,31 +297,19 @@ func (m *Model) fixSelection() {
 		m.selID = 0
 		return
 	}
-	for _, r := range m.rows {
-		if r.id == m.selID {
-			return
-		}
-	}
-	m.selID = m.rows[0].id
-}
-
-// retarget recomputes every row's target text after a resize.
-func (m *Model) retarget() {
-	cols := columns(m.width)
-	for _, r := range m.rows {
-		r.fl.setTarget(rowText(r.run, cols))
+	if _, ok := m.byID[m.selID]; !ok {
+		m.selID = m.rows[0].id
 	}
 }
 
 // sortRuns orders the board: live runs first, then queued, then finished,
 // most recent activity first within each group.
 func sortRuns(runs []ghapi.Run) {
-	sort.SliceStable(runs, func(i, j int) bool {
-		gi, gj := runGroup(runs[i]), runGroup(runs[j])
-		if gi != gj {
-			return gi < gj
+	slices.SortStableFunc(runs, func(a, b ghapi.Run) int {
+		if c := cmp.Compare(runGroup(a), runGroup(b)); c != 0 {
+			return c
 		}
-		return activity(runs[i]).After(activity(runs[j]))
+		return activity(b).Compare(activity(a))
 	})
 }
 

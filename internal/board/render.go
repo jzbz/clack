@@ -2,14 +2,19 @@ package board
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/jzbz/clack/internal/ghapi"
 )
 
+// The board's palette: amber on dark, like the real thing.
 var (
 	bgColor    = lipgloss.Color("#161511")
 	selBgColor = lipgloss.Color("#2b2618")
@@ -20,8 +25,169 @@ var (
 	redColor   = lipgloss.Color("#f26d6d")
 )
 
-// blinkPeriod is the on/off period of a BOARDING status, in flap ticks.
-const blinkPeriod = 12
+// blinkPeriod is how long a BOARDING status stays lit, and then dark.
+const blinkPeriod = 600 * time.Millisecond
+
+// styleID names every way the board paints a cell. Each one is flattened to
+// a pair of escape sequences on first use (see paint), so drawing a frame
+// never constructs a style.
+type styleID int
+
+const (
+	idBlank styleID = iota // background only, for padding
+	idText
+	idDim
+	idAmber
+	idBrand
+	idClock
+	idBoarding
+	idDeparted
+	idCancelled
+	idError
+	numStyleIDs
+)
+
+type styleSet [numStyleIDs]lipgloss.Style
+
+func buildStyles(bg lipgloss.Color) styleSet {
+	base := lipgloss.NewStyle().Background(bg)
+	return styleSet{
+		idBlank:     base,
+		idText:      base.Foreground(textColor),
+		idDim:       base.Foreground(dimColor),
+		idAmber:     base.Foreground(amberColor),
+		idBrand:     base.Foreground(amberColor).Bold(true),
+		idClock:     base.Foreground(textColor).Bold(true),
+		idBoarding:  base.Foreground(amberColor).Bold(true),
+		idDeparted:  base.Foreground(greenColor).Bold(true),
+		idCancelled: base.Foreground(redColor).Bold(true),
+		idError:     base.Foreground(redColor),
+	}
+}
+
+// paint is a style flattened to the pair of escape sequences lipgloss would
+// wrap a string in. Style.Render re-runs its width, border, margin and
+// grapheme-segmentation machinery on every call, which is most of the cost
+// of a frame; the board only ever needs a foreground, a background and bold,
+// and those sequences never change. Rendering becomes three string writes.
+type paint struct{ on, off string }
+
+func newPaint(st lipgloss.Style) paint {
+	const sentinel = "\x00"
+	on, off, ok := strings.Cut(st.Render(sentinel), sentinel)
+	if !ok {
+		return paint{} // a profile with no colour at all
+	}
+	return paint{on: on, off: off}
+}
+
+// write appends s to b wearing this paint.
+func (p paint) write(b *strings.Builder, s string) {
+	b.WriteString(p.on)
+	b.WriteString(s)
+	b.WriteString(p.off)
+}
+
+func (p paint) render(s string) string { return p.on + s + p.off }
+
+// palette is the board's styles reduced to escape sequences, one set for
+// ordinary rows and one for the selected row.
+type palette struct {
+	plain [numStyleIDs]paint
+	sel   [numStyleIDs]paint
+}
+
+var (
+	paletteOnce sync.Once
+	thePalette  palette
+)
+
+// paints builds the palette on first use. By then bubbletea has set the
+// terminal up, so lipgloss has settled on the colour profile it would have
+// used for a direct Render.
+func paints() *palette {
+	paletteOnce.Do(func() {
+		plain, sel := buildStyles(bgColor), buildStyles(selBgColor)
+		for i := range thePalette.plain {
+			thePalette.plain[i] = newPaint(plain[i])
+			thePalette.sel[i] = newPaint(sel[i])
+		}
+	})
+	return &thePalette
+}
+
+// row picks the paints for an ordinary or a selected row.
+func (p *palette) row(selected bool) *[numStyleIDs]paint {
+	if selected {
+		return &p.sel
+	}
+	return &p.plain
+}
+
+// status is the departures-board vocabulary a run's state maps onto.
+type status int
+
+const (
+	statusQueued status = iota
+	statusWaiting
+	statusBoarding
+	statusDeparted
+	statusCancelled
+	statusSkipped
+	statusHold
+	statusEnded
+	numStatuses
+)
+
+var statusWords = [numStatuses]string{
+	statusQueued:    "QUEUED",
+	statusWaiting:   "WAITING",
+	statusBoarding:  "BOARDING",
+	statusDeparted:  "DEPARTED",
+	statusCancelled: "CANCELLED",
+	statusSkipped:   "SKIPPED",
+	statusHold:      "HOLD",
+	statusEnded:     "ENDED",
+}
+
+func (s status) String() string { return statusWords[s] }
+
+// statusOf maps a run's state onto departures-board vocabulary.
+func statusOf(r ghapi.Run) status {
+	if r.Status != "completed" {
+		switch r.Status {
+		case "in_progress":
+			return statusBoarding
+		case "waiting":
+			return statusWaiting
+		default: // queued, requested, pending
+			return statusQueued
+		}
+	}
+	switch r.Conclusion {
+	case "success":
+		return statusDeparted
+	case "skipped":
+		return statusSkipped
+	case "action_required":
+		return statusHold
+	case "":
+		return statusEnded
+	default: // failure, cancelled, timed_out, startup_failure
+		return statusCancelled
+	}
+}
+
+var statusStyle = [numStatuses]styleID{
+	statusQueued:    idDim,
+	statusWaiting:   idDim,
+	statusBoarding:  idBoarding,
+	statusDeparted:  idDeparted,
+	statusCancelled: idCancelled,
+	statusSkipped:   idDim,
+	statusHold:      idDim,
+	statusEnded:     idDim,
+}
 
 type colKind int
 
@@ -33,7 +199,19 @@ const (
 	colActor
 	colStatus
 	colAge
+	numCols
 )
+
+// colStyle is how each column is painted; the status column overrides it.
+var colStyle = [numCols]styleID{
+	colTime:     idDim,
+	colRepo:     idAmber,
+	colWorkflow: idText,
+	colBranch:   idText,
+	colActor:    idText,
+	colStatus:   idText,
+	colAge:      idDim,
+}
 
 // column is one board field; width includes a trailing one-cell gap.
 type column struct {
@@ -42,8 +220,17 @@ type column struct {
 	width int
 }
 
-// columns lays out the board for a terminal width, flexing the workflow
-// column and shrinking the rest on narrow terminals.
+// cell renders s as this column: its text, then the gap that keeps it off the
+// next column, so a value that exactly fills the field cannot run into its
+// neighbour.
+func (c column) cell(s string) string { return fit(s, c.width-1) + " " }
+
+// minWorkflow is the narrowest the flexing workflow column may get.
+const minWorkflow = 8
+
+// columns lays the board out for a terminal width: the fixed fields shrink in
+// tiers, the workflow column takes up the slack, and on a very narrow
+// terminal the least essential fields drop off the board altogether.
 func columns(width int) []column {
 	repo, branch, actor := 26, 18, 13
 	switch {
@@ -56,53 +243,72 @@ func columns(width int) []column {
 	cols := []column{
 		{colTime, "TIME", 6},
 		{colRepo, "REPO", repo},
-		{colWorkflow, "WORKFLOW", 0},
+		{colWorkflow, "WORKFLOW", minWorkflow},
 		{colBranch, "BRANCH", branch},
 		{colActor, "ACTOR", actor},
 		{colStatus, "STATUS", 11},
 		{colAge, "AGE", 7},
 	}
-	fixed := 0
-	for _, c := range cols {
-		fixed += c.width
+	for _, drop := range []colKind{colActor, colBranch, colTime} {
+		if totalWidth(cols) <= width {
+			break
+		}
+		cols = slices.DeleteFunc(cols, func(c column) bool { return c.kind == drop })
 	}
-	cols[2].width = max(8, width-fixed)
+	if slack := width - totalWidth(cols); slack > 0 {
+		for i := range cols {
+			if cols[i].kind == colWorkflow {
+				cols[i].width += slack
+			}
+		}
+	}
 	return cols
 }
 
-// fit uppercases s and pads or truncates it to exactly w cells.
-func fit(s string, w int) string {
-	r := []rune(strings.ToUpper(s))
-	if len(r) > w {
-		r = r[:w]
+func totalWidth(cols []column) int {
+	n := 0
+	for _, c := range cols {
+		n += c.width
 	}
-	return string(r) + strings.Repeat(" ", w-len(r))
+	return n
 }
 
-// statusWord maps a run's state onto departures-board vocabulary.
-func statusWord(r ghapi.Run) string {
-	if r.Status == "completed" {
-		switch r.Conclusion {
-		case "success":
-			return "DEPARTED"
-		case "skipped":
-			return "SKIPPED"
-		case "action_required":
-			return "HOLD"
-		case "":
-			return "ENDED"
-		default: // failure, cancelled, timed_out, startup_failure
-			return "CANCELLED"
+// spaces is sliced for padding rather than building a fresh run of blanks.
+const maxPad = 512
+
+var spaces = strings.Repeat(" ", maxPad)
+
+func blanks(n int) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n <= maxPad:
+		return spaces[:n]
+	default:
+		return strings.Repeat(" ", n)
+	}
+}
+
+// fit renders s into exactly w flap cells: uppercased, padded or truncated,
+// with anything the board has no flap for replaced by unknownGlyph. Every
+// cell ends up one terminal column wide, so an emoji in a workflow name
+// cannot shove the columns to its right out of line.
+func fit(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(w)
+	n := 0
+	for _, r := range s {
+		if n == w {
+			break
 		}
+		b.WriteRune(glyph(unicode.ToUpper(r)))
+		n++
 	}
-	switch r.Status {
-	case "in_progress":
-		return "BOARDING"
-	case "waiting":
-		return "WAITING"
-	default: // queued, requested, pending
-		return "QUEUED"
-	}
+	b.WriteString(blanks(w - n))
+	return b.String()
 }
 
 func startedClock(r ghapi.Run) string {
@@ -113,7 +319,7 @@ func startedClock(r ghapi.Run) string {
 }
 
 // ageOf is the elapsed time of a live run, or the duration of a finished one.
-func ageOf(r ghapi.Run) time.Duration {
+func ageOf(r ghapi.Run, now time.Time) time.Duration {
 	if r.Status == "completed" {
 		if r.UpdatedAt.After(r.StartedAt) {
 			return r.UpdatedAt.Sub(r.StartedAt)
@@ -123,7 +329,7 @@ func ageOf(r ghapi.Run) time.Duration {
 	if r.StartedAt.IsZero() {
 		return 0
 	}
-	return time.Since(r.StartedAt)
+	return now.Sub(r.StartedAt)
 }
 
 // shortDur formats a duration in compact board style: 45S, 12M05S, 3H04M.
@@ -142,8 +348,9 @@ func shortDur(d time.Duration) string {
 }
 
 // rowText renders a run as the flat padded string the flap animates toward.
-func rowText(r ghapi.Run, cols []column) string {
+func rowText(r ghapi.Run, st status, cols []column, now time.Time) string {
 	var b strings.Builder
+	b.Grow(totalWidth(cols))
 	for _, c := range cols {
 		var s string
 		switch c.kind {
@@ -158,79 +365,58 @@ func rowText(r ghapi.Run, cols []column) string {
 		case colActor:
 			s = r.Actor
 		case colStatus:
-			s = statusWord(r)
+			s = st.String()
 		case colAge:
-			s = shortDur(ageOf(r))
+			s = shortDur(ageOf(r, now))
 		}
-		b.WriteString(fit(s, c.width))
+		b.WriteString(c.cell(s))
 	}
 	return b.String()
 }
 
-func styleFor(k colKind, r ghapi.Run, bg lipgloss.Color) lipgloss.Style {
-	base := lipgloss.NewStyle().Background(bg).Foreground(textColor)
-	switch k {
-	case colTime, colAge:
-		return base.Foreground(dimColor)
-	case colRepo:
-		return base.Foreground(amberColor)
-	case colStatus:
-		switch statusWord(r) {
-		case "DEPARTED":
-			return base.Foreground(greenColor).Bold(true)
-		case "BOARDING":
-			return base.Foreground(amberColor).Bold(true)
-		case "CANCELLED":
-			return base.Foreground(redColor).Bold(true)
-		default:
-			return base.Foreground(dimColor)
-		}
-	default:
-		return base
-	}
-}
+// blinkOn reports whether a blinking status is currently lit. It is driven by
+// the wall clock rather than a frame counter, so the rhythm stays even
+// however often the board repaints.
+func (m Model) blinkOn() bool { return (m.now.UnixNano()/int64(blinkPeriod))%2 == 0 }
 
 // renderRow slices the row's current flap text into styled column segments.
-func (m Model) renderRow(r *row, cols []column, selected bool) string {
+func (m Model) renderRow(b *strings.Builder, r *row, cols []column, selected bool) {
+	pt := paints().row(selected)
 	cur := r.fl.cur
-	if m.width > 0 && len(cur) > m.width {
+	if len(cur) > m.width {
 		cur = cur[:m.width]
 	}
-	bg := bgColor
-	if selected {
-		bg = selBgColor
-	}
-	blinkOn := (m.tick/blinkPeriod)%2 == 0
-	var b strings.Builder
+	// A BOARDING status blinks off entirely, like a real board.
+	dark := r.st == statusBoarding && !m.blinkOn()
+
 	pos := 0
 	for _, c := range cols {
 		if pos >= len(cur) {
 			break
 		}
 		end := min(pos+c.width, len(cur))
+		id := colStyle[c.kind]
 		seg := string(cur[pos:end])
-		// A BOARDING status blinks off entirely, like a real board.
-		if !blinkOn && c.kind == colStatus && statusWord(r.run) == "BOARDING" {
-			seg = strings.Repeat(" ", end-pos)
+		if c.kind == colStatus {
+			id = statusStyle[r.st]
+			if dark {
+				seg = blanks(end - pos)
+			}
 		}
-		b.WriteString(styleFor(c.kind, r.run, bg).Render(seg))
+		pt[id].write(b, seg)
 		pos = end
 	}
-	b.WriteString(blankCells(bg, m.width-pos))
-	return b.String()
+	pt[idBlank].write(b, blanks(m.width-pos))
 }
 
-// blankCells returns n cells of board background.
-func blankCells(bg lipgloss.Color, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", n))
+// padTo pads an already-painted line of plain width w out to the board edge.
+func padTo(s string, w, width int) string {
+	return s + paints().plain[idBlank].render(blanks(width-w))
 }
 
-func padLine(s string, width int) string {
-	return s + blankCells(bgColor, width-lipgloss.Width(s))
-}
+// chromeLines is everything View draws that is not a board row: the header,
+// the column header, the rule, the spacer and the footer's status line.
+const chromeLines = 5
 
 // View renders the whole board.
 func (m Model) View() string {
@@ -238,101 +424,168 @@ func (m Model) View() string {
 		return ""
 	}
 	cols := columns(m.width)
+	panel := m.panelRows()
+	pt := &paints().plain
+
 	var b strings.Builder
+	// Every line carries a handful of escape sequences on top of its cells.
+	b.Grow((panel + chromeLines + 2) * (m.width + 192))
 
 	b.WriteString(m.renderHeader())
-	b.WriteString("\n")
+	b.WriteByte('\n')
 	b.WriteString(m.renderColHeader(cols))
-	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(strings.Repeat("─", m.width)))
+	b.WriteByte('\n')
+	pt[idDim].write(&b, strings.Repeat("─", m.width))
 
-	// The panel keeps a fixed height: unused rows are blank flaps.
-	panel := m.maxRows
-	if limit := m.height - 7; limit > 0 && limit < panel {
-		panel = limit
+	// The panel keeps a fixed height: unused lines are blank flaps.
+	drawn := 0
+	for _, r := range m.rows {
+		if drawn == panel {
+			break
+		}
+		b.WriteByte('\n')
+		m.renderRow(&b, r, cols, r.id == m.selID)
+		drawn++
 	}
-	rows := m.rows
-	if len(rows) > panel {
-		rows = rows[:panel]
-	}
-	for _, r := range rows {
-		b.WriteString("\n")
-		b.WriteString(m.renderRow(r, cols, r.id == m.selID))
-	}
-	if len(rows) == 0 {
-		b.WriteString("\n")
+	if drawn == 0 {
 		msg := "  NO FLIGHTS ON THE BOARD"
 		if m.polling {
 			msg = "  WAITING FOR FIRST POLL…"
 		}
-		b.WriteString(padLine(lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(msg), m.width))
-		rows = append(rows, nil) // one line spent on the message
+		b.WriteByte('\n')
+		b.WriteString(padTo(pt[idDim].render(msg), utf8.RuneCountInString(msg), m.width))
+		drawn = 1
 	}
-	for i := len(rows); i < panel; i++ {
-		b.WriteString("\n")
-		b.WriteString(blankCells(bgColor, m.width))
+	for ; drawn < panel; drawn++ {
+		b.WriteByte('\n')
+		pt[idBlank].write(&b, blanks(m.width))
 	}
 
-	b.WriteString("\n\n")
+	// The spacer is painted too, so the board reads as one solid panel.
+	b.WriteByte('\n')
+	pt[idBlank].write(&b, blanks(m.width))
+	b.WriteByte('\n')
 	b.WriteString(m.renderFooter())
 	return b.String()
 }
 
+// panelRows is how many board rows fit between the header and the footer.
+func (m Model) panelRows() int {
+	chrome := chromeLines
+	if m.err != nil {
+		chrome++
+	}
+	if m.showHelp {
+		chrome++
+	}
+	panel := m.maxRows
+	if limit := m.height - chrome; m.height > 0 && limit < panel {
+		panel = limit
+	}
+	return max(panel, 1)
+}
+
+const (
+	brand   = "CLACK"
+	tagline = " · GITHUB ACTIONS DEPARTURES"
+)
+
+var taglineWidth = utf8.RuneCountInString(tagline)
+
 func (m Model) renderHeader() string {
-	title := lipgloss.NewStyle().Background(bgColor).Foreground(amberColor).Bold(true).Render("CLACK") +
-		lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(" · GITHUB ACTIONS DEPARTURES")
-	clock := lipgloss.NewStyle().Background(bgColor).Foreground(textColor).Bold(true).
-		Render(time.Now().Format("15:04:05"))
-	gap := max(m.width-lipgloss.Width(title)-lipgloss.Width(clock), 1)
-	return title + blankCells(bgColor, gap) + clock
+	pt := &paints().plain
+	clock := m.now.Format("15:04:05")
+
+	var b strings.Builder
+	pt[idBrand].write(&b, brand)
+	used := len(brand)
+	if used+taglineWidth+len(clock) < m.width {
+		pt[idDim].write(&b, tagline)
+		used += taglineWidth
+	}
+	pt[idBlank].write(&b, blanks(max(m.width-used-len(clock), 1)))
+	pt[idClock].write(&b, clock)
+	return b.String()
 }
 
 func (m Model) renderColHeader(cols []column) string {
-	st := lipgloss.NewStyle().Background(bgColor).Foreground(dimColor)
+	pt := &paints().plain
 	var b strings.Builder
+	pos := 0
 	for _, c := range cols {
-		if lipgloss.Width(b.String())+c.width > m.width {
+		if pos+c.width > m.width {
 			break
 		}
-		b.WriteString(st.Render(fit(c.title, c.width)))
+		pt[idDim].write(&b, c.cell(c.title))
+		pos += c.width
 	}
-	return padLine(b.String(), m.width)
+	return padTo(b.String(), pos, m.width)
 }
 
 func (m Model) renderFooter() string {
+	pt := &paints().plain
 	var b strings.Builder
 	if m.err != nil {
-		errLine := fmt.Sprintf("! %v", m.err)
-		if r := []rune(errLine); len(r) > m.width {
-			errLine = string(r[:m.width])
-		}
-		b.WriteString(padLine(lipgloss.NewStyle().Background(bgColor).Foreground(redColor).Render(errLine), m.width))
-		b.WriteString("\n")
+		line := clampRunes(oneLine(m.err), m.width)
+		b.WriteString(padTo(pt[idError].render(line), utf8.RuneCountInString(line), m.width))
+		b.WriteByte('\n')
 	}
-
 	if m.showHelp {
-		help := "↑/K ↓/J SELECT · O/ENTER OPEN RUN · R REFRESH · ? CLOSE · Q QUIT"
-		b.WriteString(padLine(lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(help), m.width))
-		b.WriteString("\n")
+		const help = "↑/K ↓/J SELECT · G/SHIFT+G TOP/BOTTOM · O/ENTER OPEN RUN · R REFRESH · ? CLOSE · Q QUIT"
+		line := clampRunes(help, m.width)
+		b.WriteString(padTo(pt[idDim].render(line), utf8.RuneCountInString(line), m.width))
+		b.WriteByte('\n')
 	}
 
-	left := fmt.Sprintf("POLL %s", m.interval)
-	if m.rl.Remaining >= 0 {
-		left += fmt.Sprintf(" · API %d LEFT", m.rl.Remaining)
-	}
-	if m.rl.Remaining == 0 && time.Until(m.rl.Reset) > 0 {
-		left += " · RATE LIMITED UNTIL " + m.rl.Reset.Local().Format("15:04")
-	}
-	if m.polling {
-		left += " · POLLING…"
-	} else if !m.nextPollAt.IsZero() {
-		left += " · NEXT " + shortDur(time.Until(m.nextPollAt))
-	}
-	right := "O OPEN · ? HELP · Q QUIT"
+	left := m.statusLine()
+	const right = "O OPEN · ? HELP · Q QUIT"
+	left = clampRunes(left, max(m.width-utf8.RuneCountInString(right)-1, 0))
+	gap := max(m.width-utf8.RuneCountInString(left)-utf8.RuneCountInString(right), 1)
 
-	leftSt := lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(left)
-	rightSt := lipgloss.NewStyle().Background(bgColor).Foreground(dimColor).Render(right)
-	gap := max(m.width-lipgloss.Width(leftSt)-lipgloss.Width(rightSt), 1)
-	b.WriteString(leftSt + blankCells(bgColor, gap) + rightSt)
+	pt[idDim].write(&b, left)
+	pt[idBlank].write(&b, blanks(gap))
+	pt[idDim].write(&b, right)
 	return b.String()
+}
+
+// statusLine is the footer's left half: polling cadence and API budget.
+func (m Model) statusLine() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "POLL %s", m.interval)
+	if m.rl.Remaining >= 0 {
+		fmt.Fprintf(&b, " · API %d LEFT", m.rl.Remaining)
+	}
+	if m.rl.Remaining == 0 && m.rl.Reset.After(m.now) {
+		b.WriteString(" · RATE LIMITED UNTIL " + m.rl.Reset.Local().Format("15:04"))
+	}
+	switch {
+	case m.polling:
+		b.WriteString(" · POLLING…")
+	case !m.nextPollAt.IsZero():
+		b.WriteString(" · NEXT " + shortDur(m.nextPollAt.Sub(m.now)))
+	}
+	return b.String()
+}
+
+// oneLine flattens an error onto the footer's single line. errors.Join
+// separates its parts with newlines, which would otherwise tear the frame.
+func oneLine(err error) string {
+	return "! " + strings.Join(strings.FieldsFunc(err.Error(), func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}), " ")
+}
+
+// clampRunes truncates s to at most w cells.
+func clampRunes(s string, w int) string {
+	if utf8.RuneCountInString(s) <= w {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == w {
+			return s[:i]
+		}
+		n++
+	}
+	return s
 }

@@ -77,8 +77,13 @@ func Demo() Fetcher {
 			out = append(out, *r)
 		}
 		return ghapi.Result{
-			Runs:      out,
-			RateLimit: ghapi.RateLimit{Remaining: 4990 - poll, Reset: time.Now().Add(time.Hour)},
+			Runs: out,
+			// Never reach zero: a spent budget would park the board until
+			// the reset, which is not what the demo is for.
+			RateLimit: ghapi.RateLimit{
+				Remaining: max(4990-poll, 1),
+				Reset:     time.Now().Add(time.Hour),
+			},
 		}
 	}
 }

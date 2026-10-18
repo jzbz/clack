@@ -62,9 +62,14 @@ func TestNextGlyphWraps(t *testing.T) {
 	if got := nextGlyph(' ', 'A'); got != 'A' {
 		t.Fatalf("nextGlyph(' ', 'A') = %q, want 'A'", got)
 	}
-	// A rune outside the ramp snaps straight to the target.
-	if got := nextGlyph('?', 'B'); got != 'B' {
-		t.Fatalf("nextGlyph('?', 'B') = %q, want 'B'", got)
+	// A rune the board has no flap for snaps straight to the target rather
+	// than spinning forever looking for a position it will never find.
+	const offRamp = '\u00a7'
+	if rampPos(offRamp) >= 0 {
+		t.Fatalf("%q is on the ramp; pick another rune for this test", offRamp)
+	}
+	if got := nextGlyph(offRamp, 'B'); got != 'B' {
+		t.Fatalf("nextGlyph(%q, 'B') = %q, want 'B'", offRamp, got)
 	}
 }
 
