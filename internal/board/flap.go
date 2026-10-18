@@ -12,8 +12,9 @@ const glyphRamp = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:-_/'()[]&+#@!?*•"
 // turns up in a branch or workflow name.
 const unknownGlyph = '•'
 
-// flapStagger delays a cell's first flip by (column / flapStagger) ticks, so
-// updates sweep across the row left to right instead of flipping at once.
+// flapStagger delays a cell's first flip by one tick per flapStagger cells
+// to its right of the leftmost cell that changed, so an update sweeps across
+// the row left to right instead of flipping all at once.
 const flapStagger = 6
 
 var (
@@ -66,6 +67,7 @@ type flap struct {
 	cur    []rune
 	dst    []rune
 	age    int // ticks since dst last changed
+	from   int // leftmost cell that changed; the stagger sweeps from here
 	moving int // cells not yet showing their target
 }
 
@@ -88,23 +90,30 @@ func (f *flap) setTarget(s string) {
 	}
 	f.cur = f.cur[:len(f.dst)]
 
-	f.moving = 0
+	f.moving, f.from = 0, len(f.cur)
 	for i, r := range f.cur {
 		if r != f.dst[i] {
 			f.moving++
+			f.from = min(f.from, i)
 		}
 	}
 	f.age = 0
 }
 
 // step advances every unsettled cell one glyph, honouring the stagger.
+//
+// The stagger is measured from the leftmost cell that changed, not from the
+// start of the row. A row is retargeted every second so its age keeps
+// counting, and if the delay were absolute the right-hand columns would
+// spend most of each second waiting their turn and never reach their
+// target: the AGE column would sit there crawling one glyph at a time.
 func (f *flap) step() {
 	if f.moving == 0 {
 		return
 	}
 	f.age++
 	for i, r := range f.cur {
-		if r == f.dst[i] || f.age <= i/flapStagger {
+		if r == f.dst[i] || f.age <= (i-f.from)/flapStagger {
 			continue
 		}
 		next := nextGlyph(r, f.dst[i])

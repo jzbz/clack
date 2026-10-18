@@ -45,6 +45,17 @@ type Model struct {
 	now      time.Time // wall clock as of the current message; View reads only this
 	frame    int       // generation of the live frame clock
 	lastText int64     // unix second the row text was last recomputed
+
+	// clock overrides the wall clock in tests, where the board has to be
+	// driven through real elapsed time to show how it behaves.
+	clock func() time.Time
+}
+
+func (m Model) timeNow() time.Time {
+	if m.clock != nil {
+		return m.clock()
+	}
+	return time.Now()
 }
 
 // row is one board line, keyed by run ID so edits flap in place.
@@ -121,7 +132,7 @@ func (m Model) fetchCmd() tea.Cmd {
 
 // Update handles keys, poll results and the frame clock.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	m.now = time.Now()
+	m.now = m.timeNow()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:

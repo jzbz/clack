@@ -332,6 +332,32 @@ func ageOf(r ghapi.Run, now time.Time) time.Duration {
 	return now.Sub(r.StartedAt)
 }
 
+// ageText is the AGE column: how long a live run has been going, or how
+// long a finished one took.
+func ageText(r ghapi.Run, now time.Time) string {
+	d := ageOf(r, now)
+	if r.Status == "completed" {
+		return shortDur(d) // settled for good, so spell it out
+	}
+	return liveDur(d)
+}
+
+// liveDur formats an age that is still counting: seconds while the run is
+// under a minute old, whole minutes after that. A flap cell takes a second
+// or more to turn — a digit rolling 9 to 0 is a lap of the whole ramp — so a
+// live seconds counter would spend its life mid-spin, never settling and
+// never letting the board stop repainting.
+func liveDur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%dS", max(int64(d/time.Second), 0))
+	case d < time.Hour:
+		return fmt.Sprintf("%dM", int64(d/time.Minute))
+	default:
+		return fmt.Sprintf("%dH%02dM", int64(d/time.Hour), int64(d/time.Minute)%60)
+	}
+}
+
 // shortDur formats a duration in compact board style: 45S, 12M05S, 3H04M.
 func shortDur(d time.Duration) string {
 	if d < 0 {
@@ -367,7 +393,7 @@ func rowText(r ghapi.Run, st status, cols []column, now time.Time) string {
 		case colStatus:
 			s = st.String()
 		case colAge:
-			s = shortDur(ageOf(r, now))
+			s = ageText(r, now)
 		}
 		b.WriteString(c.cell(s))
 	}

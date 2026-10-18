@@ -1,6 +1,7 @@
 package board
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -90,5 +91,32 @@ func TestFlapStagger(t *testing.T) {
 	// Cell 59 needs age > 59/6 = 9 ticks; after one it must still be blank.
 	if s[59] != ' ' {
 		t.Fatalf("stagger broken: cell 59 already shows %q after one tick", s[59])
+	}
+}
+
+// A board row is retargeted every second, and only its right-hand cells
+// change. The stagger must be measured from the leftmost cell that changed,
+// not from the start of the row: otherwise those cells spend most of every
+// second waiting their turn, are reset before they arrive, and crawl one
+// glyph at a time forever — a live AGE column reading "4M1)S".
+func TestFlapConvergesWhileRetargetedEverySecond(t *testing.T) {
+	const ticksPerSecond = 20
+	head := strings.Repeat("X", 100)
+
+	var f flap
+	settled := false
+	for sec := range 15 {
+		f.setTarget(fmt.Sprintf("%s4M%02dS", head, sec))
+		for range ticksPerSecond {
+			f.step()
+		}
+		settled = settled || f.settled()
+	}
+	if !settled {
+		t.Fatalf("a row retargeted every second never caught up; it shows %q",
+			f.String()[len(head):])
+	}
+	if got, want := f.String()[len(head):], "4M14S"; got != want {
+		t.Errorf("tail = %q, want %q", got, want)
 	}
 }

@@ -11,8 +11,8 @@ go install github.com/jzbz/clack@latest
 ```
 CLACK · GITHUB ACTIONS DEPARTURES                             20:17:14
 TIME  REPO          WORKFLOW     BRANCH    ACTOR    STATUS     AGE
-20:13 ACME/WEB      CI           MAIN      OCTOCAT  BOARDING   4M12S
-20:11 ACME/MOBILE   TESTS        FEAT/TABS MONA     QUEUED     0S
+20:13 ACME/WEB      CI           MAIN      OCTOCAT  BOARDING   4M
+20:16 ACME/MOBILE   TESTS        FEAT/TABS MONA     QUEUED     38S
 20:03 ACME/INFRA    TERRAFORM    MAIN      OCTOCAT  DEPARTED   7M04S
 19:51 ACME/WEB      LINT         FIX/CSS   MONA     CANCELLED  1M38S
 ```
@@ -20,8 +20,10 @@ TIME  REPO          WORKFLOW     BRANCH    ACTOR    STATUS     AGE
 Status vocabulary: in progress → `BOARDING` (blinks), success → `DEPARTED`,
 failure/cancelled/timed out → `CANCELLED`, queued → `QUEUED`, waiting →
 `WAITING`, skipped → `SKIPPED`, action required → `HOLD`, finished with no
-conclusion → `ENDED`. `AGE` is how long a live run has been going, or how
-long a finished one took.
+conclusion → `ENDED`. `AGE` is how long a live run has been going, or
+exactly how long a finished one took. A live age is rounded to the minute
+once past one: a flap cell takes about a second to turn, so a running
+seconds counter would never settle.
 
 The board sizes itself to the terminal: the workflow column takes up the
 slack, and on a narrow one the actor, branch and time columns drop off

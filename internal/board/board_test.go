@@ -468,3 +468,96 @@ func TestOpenBrowserRefusesNonWebURLs(t *testing.T) {
 		}
 	}
 }
+
+// columnText pulls one field out of a rendered row.
+func columnText(line string, cols []column, k colKind) string {
+	r, pos := []rune(line), 0
+	for _, c := range cols {
+		if c.kind == k {
+			return strings.TrimSpace(string(r[min(pos, len(r)):min(pos+c.width, len(r))]))
+		}
+		pos += c.width
+	}
+	return ""
+}
+
+func TestLiveDur(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0S"}, {-time.Second, "0S"}, {45 * time.Second, "45S"},
+		{time.Minute, "1M"}, {4*time.Minute + 59*time.Second, "4M"},
+		{time.Hour, "1H00M"}, {3*time.Hour + 4*time.Minute, "3H04M"},
+	}
+	for _, c := range cases {
+		if got := liveDur(c.d); got != c.want {
+			t.Errorf("liveDur(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+	// A finished run keeps its exact duration; only a live one is rounded.
+	now := time.Now()
+	done := ghapi.Run{Status: "completed", StartedAt: now.Add(-90 * time.Second), UpdatedAt: now}
+	if got := ageText(done, now); got != "1M30S" {
+		t.Errorf("finished run age = %q, want 1M30S", got)
+	}
+	live := ghapi.Run{Status: "in_progress", StartedAt: now.Add(-90 * time.Second)}
+	if got := ageText(live, now); got != "1M" {
+		t.Errorf("live run age = %q, want 1M", got)
+	}
+}
+
+// A live run's age keeps changing, so its row is retargeted every second.
+// The board must still settle. It used to not: the stagger delay was
+// measured from the start of the row, so the AGE column spent most of every
+// second waiting its turn, was reset before it arrived, and sat there
+// crawling one glyph at a time.
+func TestLiveRowSettlesAsTimePasses(t *testing.T) {
+	base := time.Now().Truncate(time.Second)
+	var elapsed time.Duration
+
+	m := New(nil, time.Minute, 10)
+	m.clock = func() time.Time { return base.Add(elapsed) }
+	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
+	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{{
+		ID: 1, Repo: "acme/web", Workflow: "ci", Branch: "main", Actor: "octocat",
+		Status: "in_progress", StartedAt: base.Add(-4 * time.Minute),
+	}}}))
+
+	// Ten seconds of animation-rate frames, with the clock actually moving.
+	settledAfter := -1
+	for i := range 200 {
+		elapsed += animFrame
+		m = frame(m)
+		if settledAfter < 0 && m.rows[0].fl.settled() {
+			settledAfter = i + 1
+		}
+	}
+	if settledAfter < 0 {
+		t.Fatalf("a live row never settled in 10s; it shows %q", m.rows[0].fl.String())
+	}
+	t.Logf("settled after %v", time.Duration(settledAfter)*animFrame)
+
+	cols := columns(110)
+	if got := columnText(m.rows[0].fl.String(), cols, colAge); got != "4M" {
+		t.Errorf("AGE = %q, want 4M", got)
+	}
+	if got := columnText(m.rows[0].fl.String(), cols, colRepo); got != "ACME/WEB" {
+		t.Errorf("REPO = %q, want ACME/WEB", got)
+	}
+
+	// A settled live row lets the board drop out of animation speed; before,
+	// it would have repainted at 20 fps for as long as the run was going.
+	if got := m.nextFrame(); got <= animFrame {
+		t.Errorf("settled live board still schedules %v, want more than %v", got, animFrame)
+	}
+
+	// It tracks the next minute over, rather than sticking at 4M.
+	for range 1400 { // another 70s
+		elapsed += animFrame
+		m = frame(m)
+	}
+	if got := columnText(m.rows[0].fl.String(), cols, colAge); got != "5M" {
+		t.Errorf("AGE after a further 70s = %q, want 5M", got)
+	}
+}
