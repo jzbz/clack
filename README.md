@@ -84,9 +84,12 @@ about once a second instead of twenty times.
 ```sh
 go test ./...                             # unit tests
 go test ./internal/board/ -bench .        # frame and merge costs
-CLACK_LIVE=1 go test ./internal/ghapi/    # one real API call
+CLACK_LIVE=1 go test ./internal/ghapi/    # three real API calls
 CLACK_SNAPSHOT=/tmp/frames go test ./internal/board/ -run TestSnapshot
 ```
+
+The live tests check that a run comes back whole, and that a second poll of
+an unchanged repo is revalidated with its ETag and costs no quota.
 
 `TestSnapshot` writes rendered frames — mid-flap, settled, narrow, and with
 the help and error lines up — as plain text, so the board can be inspected
