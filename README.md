@@ -42,7 +42,7 @@ clack --demo                                        # simulated board, no API
 | ------------ | ------------------- | -------------------------------- |
 | `--repo`     | —                   | repo to watch (`OWNER/NAME`)     |
 | `--interval` | `30s` (min `10s`)   | poll interval                    |
-| `--rows`     | `12`                | max rows on the board            |
+| `--rows`     | `12`                | rows shown at once (scroll for more) |
 | `--per-repo` | `5`                 | runs fetched per repo per poll   |
 | `--config`   | `~/.config/clack/config.yaml` | config file path       |
 | `--bell`     | `true`              | ring the terminal on a failure   |
@@ -62,11 +62,29 @@ on_fail: notify-send "CI failed" "$CLACK_REPO $CLACK_WORKFLOW"
 ```
 
 Keys: `↑`/`k` `↓`/`j` select · `g`/`G` (or `home`/`end`) top/bottom ·
-`o`/`enter` open run in browser · `r` poll now · `?` help · `q` quit.
+`pgup`/`pgdn` page · `f` cycle view · `/` search · `o`/`enter` open run in
+browser · `r` poll now · `?` help · `esc` clear the filter · `q` quit.
 
 Unknown keys in the config file are an error rather than a setting that
 silently never applies, and a `--config` path that does not exist is only
 ignored when it is the default one.
+
+## Filtering
+
+Past a couple of repos the board fills with green you are not looking for.
+`f` cycles between **ALL**, **LIVE** (anything still running or queued) and
+**FAILED** (anything red or holding). `/` searches repo, workflow, branch
+and actor, case-insensitively, as you type; `enter` keeps it, `esc` puts
+back what was there before. `esc` on a filtered board clears the filter
+rather than quitting, so backing out of a search cannot kill the board.
+
+FAILED is deliberately broader than what rings the bell. A run somebody
+cancelled is not worth interrupting them for, but it is exactly what they
+want to see when they ask the board what went wrong.
+
+Filtering is a view over what has already been fetched, so it costs no API
+calls. `--rows` caps what is on screen, not what is kept: the selection
+scrolls the board, and the footer says which rows you are looking at.
 
 ## Alerts
 

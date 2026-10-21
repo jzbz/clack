@@ -465,18 +465,18 @@ func (m Model) View() string {
 
 	// The panel keeps a fixed height: unused lines are blank flaps.
 	drawn := 0
-	for _, r := range m.rows {
-		if drawn == panel {
-			break
-		}
+	for _, r := range m.window() {
 		b.WriteByte('\n')
 		m.renderRow(&b, r, cols, r.id == m.selID)
 		drawn++
 	}
 	if drawn == 0 {
 		msg := "  NO FLIGHTS ON THE BOARD"
-		if m.polling {
+		switch {
+		case m.polling:
 			msg = "  WAITING FOR FIRST POLL…"
+		case m.filter.active():
+			msg = "  NO FLIGHTS MATCH"
 		}
 		b.WriteByte('\n')
 		b.WriteString(padTo(pt[idDim].render(msg), utf8.RuneCountInString(msg), m.width))
@@ -502,6 +502,9 @@ func (m Model) panelRows() int {
 		chrome++
 	}
 	if m.showHelp {
+		chrome++
+	}
+	if m.typing || m.filter.active() {
 		chrome++
 	}
 	panel := m.maxRows
@@ -557,9 +560,19 @@ func (m Model) renderFooter() string {
 		b.WriteByte('\n')
 	}
 	if m.showHelp {
-		const help = "↑/K ↓/J SELECT · G/SHIFT+G TOP/BOTTOM · O/ENTER OPEN RUN · R REFRESH · ? CLOSE · Q QUIT"
+		const help = "↑/K ↓/J SELECT · G/SHIFT+G TOP/BOTTOM · F VIEW · / SEARCH · " +
+			"O/ENTER OPEN RUN · R REFRESH · ? CLOSE · Q QUIT"
 		line := clampRunes(help, m.width)
 		b.WriteString(padTo(pt[idDim].render(line), utf8.RuneCountInString(line), m.width))
+		b.WriteByte('\n')
+	}
+	if m.typing || m.filter.active() {
+		line := clampRunes(m.filterLine(), m.width)
+		id := idDim
+		if m.typing {
+			id = idAmber
+		}
+		b.WriteString(padTo(pt[id].render(line), utf8.RuneCountInString(line), m.width))
 		b.WriteByte('\n')
 	}
 
@@ -571,6 +584,21 @@ func (m Model) renderFooter() string {
 	pt[idDim].write(&b, left)
 	pt[idBlank].write(&b, blanks(gap))
 	pt[idDim].write(&b, right)
+	return b.String()
+}
+
+// filterLine says what the board is hiding, or takes the search as it is
+// typed. Without it a filtered board just looks like a quiet one.
+func (m Model) filterLine() string {
+	if m.typing {
+		return "SEARCH /" + strings.ToUpper(m.filter.query) + "\u2588"
+	}
+	var b strings.Builder
+	b.WriteString("SHOWING " + m.filter.mode.String())
+	if m.filter.query != "" {
+		b.WriteString(" /" + strings.ToUpper(m.filter.query))
+	}
+	fmt.Fprintf(&b, " · %d OF %d · ESC CLEAR", len(m.shown), len(m.rows))
 	return b.String()
 }
 
@@ -589,6 +617,11 @@ func (m Model) statusLine() string {
 		b.WriteString(" · POLLING…")
 	case !m.nextPollAt.IsZero():
 		b.WriteString(" · NEXT " + shortDur(m.nextPollAt.Sub(m.now)))
+	}
+	// Say so when the board is showing a window onto a longer list.
+	if panel := m.panelRows(); len(m.shown) > panel {
+		top := max(0, min(m.top, len(m.shown)-panel))
+		fmt.Fprintf(&b, " · ROWS %d-%d OF %d", top+1, top+panel, len(m.shown))
 	}
 	return b.String()
 }

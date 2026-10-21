@@ -191,17 +191,25 @@ func TestMergeKeepsRowIdentity(t *testing.T) {
 	}
 }
 
-func TestMergeTrimsToMaxRows(t *testing.T) {
-	m := New(nil, Options{Interval: time.Minute, MaxRows: 2})
-	m.width = 100
+// maxRows caps what is drawn, not what is kept: the rest has to stay around
+// for filtering and scrolling to reach.
+func TestMaxRowsCapsThePanelNotTheBoard(t *testing.T) {
 	now := time.Now()
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 2})
+	m = step(m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	m.merge([]ghapi.Run{
 		{ID: 1, Status: "queued", StartedAt: now},
 		{ID: 2, Status: "queued", StartedAt: now.Add(-time.Minute)},
 		{ID: 3, Status: "queued", StartedAt: now.Add(-2 * time.Minute)},
 	})
-	if len(m.rows) != 2 || len(m.byID) != 2 {
-		t.Fatalf("rows=%d index=%d, want 2 and 2", len(m.rows), len(m.byID))
+	if len(m.rows) != 3 || len(m.byID) != 3 {
+		t.Fatalf("rows=%d index=%d, want 3 and 3 kept", len(m.rows), len(m.byID))
+	}
+	if len(m.shown) != 3 {
+		t.Fatalf("shown=%d, want all 3 past the filter", len(m.shown))
+	}
+	if got := len(m.window()); got != 2 {
+		t.Fatalf("window = %d rows, want maxRows 2", got)
 	}
 }
 

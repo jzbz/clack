@@ -59,6 +59,21 @@ func TestSnapshot(t *testing.T) {
 		write(fmt.Sprintf("frame-w%d.txt", w))
 	}
 
+	// Filtered views, and the search as it is typed.
+	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 24})
+	m.filter.mode = showFailed
+	m.refilter()
+	m = frames(m, 400)
+	write("frame-failed.txt")
+
+	m.filter.clear()
+	m.filter.setQuery("web")
+	m.typing = true
+	m.refilter()
+	m = frames(m, 400)
+	write("frame-search.txt")
+	m.typing = false
+
 	// The help line and an error share the footer with the status line.
 	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
 	m.showHelp = true

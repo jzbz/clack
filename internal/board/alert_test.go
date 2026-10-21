@@ -178,8 +178,8 @@ func TestAlertSurvivesRowTrimming(t *testing.T) {
 	if len(*got) != 1 || (*got)[0][0].ID != 2 {
 		t.Fatalf("a trimmed-off failure was not reported: %v", *got)
 	}
-	if len(m.rows) != 1 || m.rows[0].id != 1 {
-		t.Fatalf("maxRows not honoured: %+v", m.rows)
+	if w := m.window(); len(w) != 1 || w[0].id != 1 {
+		t.Fatalf("maxRows not honoured on screen: %+v", w)
 	}
 
 	poll(t, m, older, run(1, "in_progress", ""))

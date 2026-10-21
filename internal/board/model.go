@@ -30,9 +30,14 @@ type Model struct {
 	interval time.Duration
 	maxRows  int
 
-	rows       []*row
+	rows       []*row // every run the last poll reported, in board order
+	shown      []*row // the subset the filter lets through
+	top        int    // index into shown of the first row on screen
 	byID       map[int64]*row
 	selID      int64 // run ID of the highlighted row; 0 = none yet
+	filter     filter
+	typing     bool   // the query line has the keyboard
+	queryWas   string // query to restore if the user escapes out
 	polling    bool
 	nextPollAt time.Time
 	rl         ghapi.RateLimit
@@ -125,7 +130,7 @@ func (m *Model) nextFrameCmd(d time.Duration) tea.Cmd {
 // settled board therefore repaints once a second instead of twenty times.
 func (m Model) nextFrame() time.Duration {
 	boarding := false
-	for _, r := range m.rows {
+	for _, r := range m.window() {
 		if !r.fl.settled() {
 			return animFrame
 		}
@@ -156,10 +161,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.retarget()
+		m.scrollToSelection()
 		cmd := m.nextFrameCmd(animFrame)
 		return m, cmd
 
 	case tea.KeyMsg:
+		if m.typing {
+			return m.handleQueryKey(msg)
+		}
 		return m.handleKey(msg)
 
 	case browserMsg:
@@ -204,7 +213,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.frame {
 			return m, nil // superseded schedule
 		}
-		for _, r := range m.rows {
+		// Only what is on screen animates; a row scrolled out of view
+		// costs nothing and flaps in when it returns.
+		for _, r := range m.window() {
 			r.fl.step()
 		}
 		// Ages count live, so recompute the row text once a second.
@@ -221,8 +232,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "ctrl+c", "esc":
+	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "esc":
+		// Escape backs out of a filter first; it only quits a board that
+		// is already showing everything.
+		if !m.filter.active() {
+			return m, tea.Quit
+		}
+		m.filter.clear()
+		m.refilter()
+	case "f":
+		m.filter.mode = m.filter.mode.next()
+		m.refilter()
+	case "/":
+		m.typing, m.queryWas = true, m.filter.query
 	case "j", "down":
 		m.move(1)
 	case "k", "up":
@@ -230,7 +254,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g", "home":
 		m.moveTo(0)
 	case "G", "end":
-		m.moveTo(len(m.rows) - 1)
+		m.moveTo(len(m.shown) - 1)
+	case "pgdown", "ctrl+f":
+		m.move(m.panelRows())
+	case "pgup", "ctrl+b":
+		m.move(-m.panelRows())
 	case "o", "enter":
 		if r := m.selected(); r != nil && r.run.URL != "" {
 			url := r.run.URL
@@ -242,6 +270,37 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.polling {
 			m.polling = true
 			return m, m.fetchCmd()
+		}
+	}
+	return m, nil
+}
+
+// handleQueryKey edits the search while the query line has the keyboard.
+func (m Model) handleQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEnter:
+		m.typing = false // keep what was typed
+	case tea.KeyEsc:
+		m.typing = false
+		m.filter.setQuery(m.queryWas)
+		m.refilter()
+	case tea.KeyBackspace:
+		if q := []rune(m.filter.query); len(q) > 0 {
+			m.filter.setQuery(string(q[:len(q)-1]))
+			m.refilter()
+		}
+	case tea.KeyCtrlU:
+		m.filter.setQuery("")
+		m.refilter()
+	default:
+		// Space arrives as its own key type but still carries its rune,
+		// so one check covers every printable key. Alt-chords are not
+		// text and must not land in the query.
+		if len(msg.Runes) > 0 && !msg.Alt {
+			m.filter.setQuery(m.filter.query + string(msg.Runes))
+			m.refilter()
 		}
 	}
 	return m, nil
@@ -268,9 +327,6 @@ func (m Model) nextPollIn() time.Duration {
 func (m *Model) merge(runs []ghapi.Run) []ghapi.Run {
 	failed := m.newFailures(runs)
 	sortRuns(runs)
-	if len(runs) > m.maxRows {
-		runs = runs[:m.maxRows]
-	}
 	cols := columns(m.width)
 	next := make([]*row, 0, len(runs))
 	for _, rn := range runs {
@@ -288,8 +344,38 @@ func (m *Model) merge(runs []ghapi.Run) []ghapi.Run {
 		m.byID[r.id] = r
 	}
 	m.rows = next
-	m.fixSelection()
+	m.refilter()
 	return failed
+}
+
+// refilter recomputes which rows are on screen. Everything the poll
+// returned stays in m.rows: the filter is a view over it, so changing the
+// filter never needs another API call.
+func (m *Model) refilter() {
+	m.shown = m.shown[:0]
+	for _, r := range m.rows {
+		if m.filter.match(r.run, r.st) {
+			m.shown = append(m.shown, r)
+		}
+	}
+	m.fixSelection()
+	m.scrollToSelection()
+}
+
+// window is the slice of filtered rows actually on screen.
+func (m Model) window() []*row {
+	panel := m.panelRows()
+	top := max(0, min(m.top, len(m.shown)-panel))
+	return m.shown[top:min(top+panel, len(m.shown))]
+}
+
+// scrollToSelection scrolls the least it can to keep the selection in view.
+func (m *Model) scrollToSelection() {
+	panel := m.panelRows()
+	i := m.selectedIndex()
+	m.top = min(m.top, i)
+	m.top = max(m.top, i-panel+1)
+	m.top = max(0, min(m.top, max(len(m.shown)-panel, 0)))
 }
 
 // newFailures picks out the runs that have broken since the last poll, given
@@ -344,17 +430,20 @@ func (m *Model) retarget() {
 // move shifts the selection by d rows, clamped to the board.
 func (m *Model) move(d int) { m.moveTo(m.selectedIndex() + d) }
 
-// moveTo selects row i, clamped to the board.
+// moveTo selects the i'th visible row, clamped to the board, and scrolls
+// far enough to show it.
 func (m *Model) moveTo(i int) {
-	if len(m.rows) == 0 {
+	if len(m.shown) == 0 {
 		return
 	}
-	m.selID = m.rows[min(max(i, 0), len(m.rows)-1)].id
+	m.selID = m.shown[min(max(i, 0), len(m.shown)-1)].id
+	m.scrollToSelection()
 }
 
-// selectedIndex resolves selID to a row index, defaulting to the top row.
+// selectedIndex resolves selID to a visible row index, defaulting to the
+// top row.
 func (m Model) selectedIndex() int {
-	for i, r := range m.rows {
+	for i, r := range m.shown {
 		if r.id == m.selID {
 			return i
 		}
@@ -362,23 +451,27 @@ func (m Model) selectedIndex() int {
 	return 0
 }
 
-// selected returns the highlighted row, or nil when the board is empty.
+// selected returns the highlighted row, or nil when nothing is on screen.
 func (m Model) selected() *row {
-	if len(m.rows) == 0 {
+	if len(m.shown) == 0 {
 		return nil
 	}
-	return m.rows[m.selectedIndex()]
+	return m.shown[m.selectedIndex()]
 }
 
-// fixSelection keeps the selection on a surviving row after a merge.
+// fixSelection keeps the selection on a row that is still showing, after a
+// merge or a change of filter.
 func (m *Model) fixSelection() {
-	if len(m.rows) == 0 {
+	if len(m.shown) == 0 {
 		m.selID = 0
 		return
 	}
-	if _, ok := m.byID[m.selID]; !ok {
-		m.selID = m.rows[0].id
+	for _, r := range m.shown {
+		if r.id == m.selID {
+			return
+		}
 	}
+	m.selID = m.shown[0].id
 }
 
 // sortRuns orders the board: live runs first, then queued, then finished,
