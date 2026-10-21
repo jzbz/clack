@@ -2,6 +2,7 @@ package board
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,15 @@ import (
 
 	"github.com/jzbz/clack/internal/ghapi"
 )
+
+// TestMain makes certain no test in this package can put a browser window
+// on somebody's screen. A test that drives the board can return a command
+// that launches one, and running that command to see what it was is exactly
+// how a fake URL ends up in a real tab.
+func TestMain(m *testing.M) {
+	openURL = func(string) error { return nil }
+	os.Exit(m.Run())
+}
 
 // step delivers msg to m and returns the updated model.
 func step(m Model, msg tea.Msg) Model {

@@ -566,6 +566,11 @@ func (m Model) renderSelection() string {
 		return padTo(paints().plain[idBoarding].render(line),
 			utf8.RuneCountInString(line), m.width)
 	}
+	if m.note != "" {
+		line := clampRunes(m.note, m.width)
+		return padTo(paints().plain[idDim].render(line),
+			utf8.RuneCountInString(line), m.width)
+	}
 	r := m.selected()
 	if r == nil {
 		return padTo("", 0, m.width)

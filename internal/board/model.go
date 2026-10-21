@@ -69,7 +69,8 @@ type Model struct {
 	notify notifier
 
 	rerun   Rerunner
-	confirm *row // the run a re-run is waiting to be confirmed for
+	confirm *row   // the run a re-run is waiting to be confirmed for
+	note    string // one-off word to the user, cleared by the next keypress
 
 	// printed marks a board rendered once to be read as text rather than
 	// driven: nothing blinks, the panel is as tall as its contents, and
@@ -270,6 +271,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.note = "" // whatever it said, the user has moved on
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -301,7 +303,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o", "enter":
 		if r := m.selected(); r != nil && r.run.URL != "" {
 			url := r.run.URL
-			return m, func() tea.Msg { return browserMsg{openBrowser(url)} }
+			return m, func() tea.Msg { return browserMsg{openURL(url)} }
 		}
 	case "R":
 		m.askRerun()
@@ -334,19 +336,36 @@ func (m *Model) askRerun() {
 	}
 }
 
-// handleConfirmKey answers the re-run question. Only yes means yes.
+// askingRerun reports whether the re-run question is on screen.
+func (m Model) askingRerun() bool { return m.confirm != nil }
+
+// handleConfirmKey answers the re-run question, which is modal: only an
+// explicit yes or no moves it, and every other key is ignored.
+//
+// Treating any key but y as "no" was worse than it sounds. Enter is a
+// plausible way to try to confirm, so it dismissed the question with
+// nothing to show for it; and enter also opens the selected run in a
+// browser, so pressing it again — which is what you do when a key seems
+// not to have registered — fell through to the board and opened one.
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	r := m.confirm
-	m.confirm = nil
-	if msg.String() != "y" && msg.String() != "Y" {
-		return m, nil
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "y", "Y":
+		r := m.confirm
+		m.confirm = nil
+		m.note = "RE-RUN REQUESTED"
+		rerun, repo, id := m.rerun, r.run.Repo, r.id
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), rerunTimeout)
+			defer cancel()
+			return rerunMsg{rerun(ctx, repo, id)}
+		}
+	case "n", "N", "esc", "q":
+		m.confirm = nil
+		m.note = "RE-RUN CANCELLED"
 	}
-	rerun, repo, id := m.rerun, r.run.Repo, r.id
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), rerunTimeout)
-		defer cancel()
-		return rerunMsg{rerun(ctx, repo, id)}
-	}
+	return m, nil // the question stays up
 }
 
 // handleQueryKey edits the search while the query line has the keyboard.

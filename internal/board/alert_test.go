@@ -451,3 +451,73 @@ func TestRerunResultHandling(t *testing.T) {
 		t.Error("a successful re-run did not schedule a poll")
 	}
 }
+
+// The re-run question is modal. Enter is a plausible way to try to confirm
+// it, and it is also the key that opens the selected run in a browser: when
+// enter quietly meant "no", pressing it twice — which is what you do when a
+// key seems not to have registered — opened a browser tab instead.
+func TestRerunPromptIgnoresUnrelatedKeys(t *testing.T) {
+	m, asked := rerunBoard(t, nil)
+	for _, r := range m.rows {
+		r.run.URL = "https://github.com/acme/web/actions/runs/1"
+	}
+	m.moveTo(1)
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+
+	// Keys that are neither yes nor no leave the question exactly as it was.
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune("o")},
+		{Type: tea.KeyRunes, Runes: []rune("j")},
+		{Type: tea.KeySpace, Runes: []rune{' '}},
+	} {
+		um, cmd := m.Update(key)
+		*m = um.(Model)
+		if cmd != nil {
+			t.Fatalf("%q did something while the question was up", key.String())
+		}
+		if !m.askingRerun() {
+			t.Fatalf("%q dismissed the question", key.String())
+		}
+	}
+	if len(*asked) != 0 {
+		t.Fatalf("re-ran without an answer: %v", *asked)
+	}
+
+	// n says no, and says so, so nobody presses it twice.
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.askingRerun() {
+		t.Fatal("n left the question up")
+	}
+	if !strings.Contains(m.note, "CANCELLED") {
+		t.Errorf("note = %q, want it to say the re-run was cancelled", m.note)
+	}
+	if got := stripANSI(m.renderSelection()); !strings.Contains(got, "CANCELLED") {
+		t.Errorf("the cancellation is not on screen: %q", got)
+	}
+
+	// And the next keypress clears it again.
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if m.note != "" {
+		t.Errorf("note survived the next keypress: %q", m.note)
+	}
+}
+
+// esc answers the question rather than clearing the filter behind it.
+func TestRerunPromptEscapeIsNo(t *testing.T) {
+	m, asked := rerunBoard(t, nil)
+	m.filter.mode = showFailed
+	m.refilter()
+	m.moveTo(0)
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.askingRerun() {
+		t.Fatal("esc left the question up")
+	}
+	if !m.filter.active() {
+		t.Error("esc cleared the filter as well as answering the question")
+	}
+	if len(*asked) != 0 {
+		t.Fatalf("esc re-ran something: %v", *asked)
+	}
+}

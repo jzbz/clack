@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+// openURL is the browser launcher, swappable so a test can never put a real
+// window on somebody's screen.
+var openURL = openBrowser
+
 // openBrowser opens url in the default browser without blocking. Output is
 // discarded so the launcher cannot scribble over the TUI.
 func openBrowser(url string) error {

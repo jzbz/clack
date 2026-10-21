@@ -163,8 +163,10 @@ board and comes back.
 
 `R` (shift) re-runs the selected run. It is the one thing clack writes, so
 it asks first: the line under the board turns into `RE-RUN ACME/WEB · CI ·
-MAIN?  Y / N`, and only `y` sends it. Any other key is no — including
-`enter`, which is too easy to hit by accident.
+MAIN?  Y / N`. The question is modal — `y` sends it, `n` or `esc` cancel
+and say so, and every other key is ignored while it is up. In particular
+`enter` neither confirms nor cancels: it is too easy to hit by accident,
+and it is also the key that opens a run in a browser.
 
 Only a finished run can be re-run; pressing `R` on one that is still going
 says so instead. The run keeps its ID and goes back to queued, so it flaps
