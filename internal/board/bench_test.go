@@ -11,7 +11,7 @@ import (
 func benchBoard(tb testing.TB) Model {
 	tb.Helper()
 	fetch := Demo()
-	m := New(fetch, time.Minute, 12)
+	m := New(fetch, Options{Interval: time.Minute, MaxRows: 12})
 	m = step(m, tea.WindowSizeMsg{Width: 120, Height: 30})
 	m = step(m, runsMsg(fetch(tb.Context())))
 	return frames(m, 400)
@@ -36,7 +36,7 @@ func BenchmarkFrame(b *testing.B) {
 
 func BenchmarkMerge(b *testing.B) {
 	fetch := Demo()
-	m := New(fetch, time.Minute, 12)
+	m := New(fetch, Options{Interval: time.Minute, MaxRows: 12})
 	m = step(m, tea.WindowSizeMsg{Width: 120, Height: 30})
 	res := fetch(b.Context())
 	b.ReportAllocs()

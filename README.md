@@ -45,6 +45,8 @@ clack --demo                                        # simulated board, no API
 | `--rows`     | `12`                | max rows on the board            |
 | `--per-repo` | `5`                 | runs fetched per repo per poll   |
 | `--config`   | `~/.config/clack/config.yaml` | config file path       |
+| `--bell`     | `true`              | ring the terminal on a failure   |
+| `--on-fail`  | —                   | shell command to run on a failure |
 
 Config file (all keys optional; flags win):
 
@@ -55,6 +57,8 @@ repos:
 interval: 20s
 rows: 15
 per_repo: 5
+bell: true
+on_fail: notify-send "CI failed" "$CLACK_REPO $CLACK_WORKFLOW"
 ```
 
 Keys: `↑`/`k` `↓`/`j` select · `g`/`G` (or `home`/`end`) top/bottom ·
@@ -63,6 +67,30 @@ Keys: `↑`/`k` `↓`/`j` select · `g`/`G` (or `home`/`end`) top/bottom ·
 Unknown keys in the config file are an error rather than a setting that
 silently never applies, and a `--config` path that does not exist is only
 ignored when it is the default one.
+
+## Alerts
+
+A board you have to watch is not much better than a browser tab, so clack
+tells you when something breaks. When a run goes red it rings the terminal
+bell (`--bell=false` to stop it) and runs `--on-fail`, if you set one:
+
+```sh
+clack --repo acme/web --on-fail 'notify-send "CI failed" "$CLACK_REPO $CLACK_WORKFLOW"'
+```
+
+The command goes to `sh -c` (`cmd /c` on Windows) and the run is passed in
+the environment, never spliced into the command, so a branch name cannot
+turn into shell: `CLACK_REPO`, `CLACK_WORKFLOW`, `CLACK_BRANCH`,
+`CLACK_ACTOR`, `CLACK_STATUS`, `CLACK_CONCLUSION`, `CLACK_URL`,
+`CLACK_RUN_ID`. Its output is discarded, it is given 30 seconds, and a
+non-zero exit shows up in the footer.
+
+What counts as worth interrupting you: `failure`, `timed_out` and
+`startup_failure`. A run somebody cancelled on purpose, or one that was
+skipped, appears on the board but stays quiet. The first poll never alerts —
+it is seeding the board from history, and everything red on it has already
+happened. Each run is reported once, even if it drops off the bottom of the
+board and comes back.
 
 ## Rate limits
 

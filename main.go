@@ -74,6 +74,8 @@ type fileConfig struct {
 	Interval string   `yaml:"interval"`
 	Rows     int      `yaml:"rows"`
 	PerRepo  int      `yaml:"per_repo"`
+	Bell     *bool    `yaml:"bell"` // pointer so "unset" differs from false
+	OnFail   string   `yaml:"on_fail"`
 }
 
 // options are the settings clack runs with, once flags, the config file and
@@ -84,6 +86,8 @@ type options struct {
 	rows     int
 	perRepo  int
 	demo     bool
+	bell     bool
+	onFail   string
 }
 
 // resolve turns command-line arguments into options. Flags win over the
@@ -101,6 +105,8 @@ func resolve(args []string) (options, error) {
 	flags.IntVar(&opt.rows, "rows", 0, "max rows on the board (default 12)")
 	flags.IntVar(&opt.perRepo, "per-repo", 0, "runs fetched per repo (default 5)")
 	flags.BoolVar(&opt.demo, "demo", false, "run on simulated data, no API calls")
+	flags.BoolVar(&opt.bell, "bell", true, "ring the terminal when a run fails")
+	flags.StringVar(&opt.onFail, "on-fail", "", "shell `command` to run when a run fails")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), usage)
 		flags.PrintDefaults()
@@ -133,6 +139,12 @@ func resolve(args []string) (options, error) {
 	}
 	if !given["per-repo"] {
 		opt.perRepo = fc.PerRepo
+	}
+	if !given["bell"] && fc.Bell != nil {
+		opt.bell = *fc.Bell
+	}
+	if !given["on-fail"] && fc.OnFail != "" {
+		opt.onFail = fc.OnFail
 	}
 
 	opt.repos = repos
@@ -169,7 +181,13 @@ func run(args []string) error {
 		fetch = ghapi.NewClient(token, opt.repos, opt.perRepo).Fetch
 	}
 
-	p := tea.NewProgram(board.New(fetch, opt.interval, opt.rows), tea.WithAltScreen())
+	m := board.New(fetch, board.Options{
+		Interval: opt.interval,
+		MaxRows:  opt.rows,
+		Bell:     opt.bell,
+		OnFail:   opt.onFail,
+	})
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }

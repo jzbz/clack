@@ -46,9 +46,16 @@ type Model struct {
 	frame    int       // generation of the live frame clock
 	lastText int64     // unix second the row text was last recomputed
 
+	alerted map[int64]bool // runs already reported as failed
+	seeded  bool           // a first poll has landed, so changes are news
+
 	// clock overrides the wall clock in tests, where the board has to be
 	// driven through real elapsed time to show how it behaves.
 	clock func() time.Time
+
+	// notify delivers failures. nil when the user wants no alerts, and
+	// replaced in tests so they neither ring nor spawn anything.
+	notify notifier
 }
 
 func (m Model) timeNow() time.Time {
@@ -66,15 +73,25 @@ type row struct {
 	fl  flap
 }
 
-// New builds a Model polling with fetch every interval, showing maxRows runs.
-func New(fetch Fetcher, interval time.Duration, maxRows int) Model {
+// Options configure the board beyond where its runs come from.
+type Options struct {
+	Interval time.Duration // poll interval, floored at minInterval
+	MaxRows  int           // most runs to keep on the board
+	Bell     bool          // ring the terminal when a run fails
+	OnFail   string        // shell command to run when a run fails
+}
+
+// New builds a Model polling with fetch.
+func New(fetch Fetcher, opt Options) Model {
 	return Model{
 		fetch:    fetch,
-		interval: max(interval, minInterval),
-		maxRows:  max(maxRows, 1),
+		interval: max(opt.Interval, minInterval),
+		maxRows:  max(opt.MaxRows, 1),
 		byID:     map[int64]*row{},
+		alerted:  map[int64]bool{},
 		rl:       ghapi.RateLimit{Remaining: -1},
 		now:      time.Now(),
+		notify:   newNotifier(opt.Bell, opt.OnFail),
 	}
 }
 
@@ -83,6 +100,7 @@ type (
 	frameMsg   struct{ gen int } // gen fences out ticks from a superseded schedule
 	runsMsg    ghapi.Result
 	browserMsg struct{ err error }
+	alertMsg   struct{ err error }
 )
 
 // Init starts the first poll and the frame clock.
@@ -149,6 +167,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 		}
 
+	case alertMsg:
+		if msg.err != nil {
+			m.err = msg.err
+		}
+
 	case pollMsg:
 		if !m.polling {
 			m.polling = true
@@ -168,13 +191,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rl = res.RateLimit
 		// A clean poll with no runs really does mean an empty board; a
 		// failed one keeps whatever was last known good.
+		var failed []ghapi.Run
 		if res.Err == nil || len(res.Runs) > 0 {
-			m.merge(res.Runs)
+			failed = m.merge(res.Runs)
 		}
 		delay := m.nextPollIn()
 		m.nextPollAt = m.now.Add(delay)
 		poll := tea.Tick(delay, func(time.Time) tea.Msg { return pollMsg{} })
-		return m, tea.Batch(poll, m.nextFrameCmd(m.nextFrame()))
+		return m, tea.Batch(poll, m.nextFrameCmd(m.nextFrame()), m.alertCmd(failed))
 
 	case frameMsg:
 		if msg.gen != m.frame {
@@ -239,8 +263,10 @@ func (m Model) nextPollIn() time.Duration {
 }
 
 // merge folds freshly fetched runs into the board: sort, trim, then retarget
-// each surviving row's flap so changes animate.
-func (m *Model) merge(runs []ghapi.Run) {
+// each surviving row's flap so changes animate. It returns the runs that
+// have just gone wrong, which the caller turns into an alert.
+func (m *Model) merge(runs []ghapi.Run) []ghapi.Run {
+	failed := m.newFailures(runs)
 	sortRuns(runs)
 	if len(runs) > m.maxRows {
 		runs = runs[:m.maxRows]
@@ -263,6 +289,48 @@ func (m *Model) merge(runs []ghapi.Run) {
 	}
 	m.rows = next
 	m.fixSelection()
+	return failed
+}
+
+// newFailures picks out the runs that have broken since the last poll, given
+// everything this poll reported — before the board is trimmed to maxRows, so
+// a failure pushed off the bottom still gets its one alert.
+//
+// Nothing is reported for the first poll: the board is seeding itself from
+// history there, and every red run already on it is old news.
+func (m *Model) newFailures(runs []ghapi.Run) []ghapi.Run {
+	var failed []ghapi.Run
+	seen := make(map[int64]bool, len(runs))
+	for _, r := range runs {
+		seen[r.ID] = true
+		if !isFailure(r) || m.alerted[r.ID] {
+			continue
+		}
+		m.alerted[r.ID] = true
+		if m.seeded {
+			failed = append(failed, r)
+		}
+	}
+	// Forget runs GitHub no longer reports. That keeps the set bounded, and
+	// a run still in the window is never alerted on twice, however often it
+	// drops off the visible board and comes back.
+	for id := range m.alerted {
+		if !seen[id] {
+			delete(m.alerted, id)
+		}
+	}
+	m.seeded = true
+	return failed
+}
+
+// alertCmd delivers failures off the update loop, so a slow hook cannot
+// stall the board.
+func (m Model) alertCmd(failed []ghapi.Run) tea.Cmd {
+	notify := m.notify
+	if notify == nil || len(failed) == 0 {
+		return nil
+	}
+	return func() tea.Msg { return alertMsg{notify(failed)} }
 }
 
 // retarget recomputes every row's target text, after a resize or as ages tick.

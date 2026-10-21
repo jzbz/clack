@@ -133,3 +133,42 @@ func TestRunRejectsBadConfigRepo(t *testing.T) {
 		t.Fatal("a malformed repo in the config file was accepted")
 	}
 }
+
+// The bell is on unless something turns it off, and "off" in the config
+// file has to be distinguishable from "not mentioned".
+func TestResolveAlertOptions(t *testing.T) {
+	plain := writeConfig(t, "repos:\n  - acme/web\n")
+	cases := []struct {
+		name   string
+		config string
+		args   []string
+		bell   bool
+		onFail string
+	}{
+		{"default", plain, nil, true, ""},
+		{"config turns the bell off", "repos:\n  - acme/web\nbell: false\n", nil, false, ""},
+		{"config sets a hook", "repos:\n  - acme/web\non_fail: notify-send ci\n", nil, true, "notify-send ci"},
+		{"flag beats config", "repos:\n  - acme/web\nbell: false\n", []string{"-bell"}, true, ""},
+		{"flag turns the bell off", plain, []string{"-bell=false"}, false, ""},
+		{"flag hook beats config", "repos:\n  - acme/web\non_fail: from-config\n",
+			[]string{"-on-fail", "from-flag"}, true, "from-flag"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := c.config
+			if !strings.HasPrefix(path, "/") {
+				path = writeConfig(t, c.config)
+			}
+			got, err := resolve(append([]string{"-config", path}, c.args...))
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got.bell != c.bell {
+				t.Errorf("bell = %v, want %v", got.bell, c.bell)
+			}
+			if got.onFail != c.onFail {
+				t.Errorf("onFail = %q, want %q", got.onFail, c.onFail)
+			}
+		})
+	}
+}

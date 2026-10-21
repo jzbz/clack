@@ -29,7 +29,7 @@ func TestSnapshot(t *testing.T) {
 	}
 
 	fetch := Demo()
-	m := New(fetch, 2*time.Second, 12)
+	m := New(fetch, Options{Interval: 2 * time.Second, MaxRows: 12})
 	write := func(name string) {
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte(stripANSI(m.View())), 0o644); err != nil {

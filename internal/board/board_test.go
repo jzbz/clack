@@ -172,7 +172,7 @@ func hasColumn(cols []column, k colKind) bool {
 }
 
 func TestMergeKeepsRowIdentity(t *testing.T) {
-	m := New(nil, time.Minute, 10)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
 	m.width = 100
 	run := ghapi.Run{ID: 7, Repo: "acme/web", Status: "queued", StartedAt: time.Now()}
 	m.merge([]ghapi.Run{run})
@@ -192,7 +192,7 @@ func TestMergeKeepsRowIdentity(t *testing.T) {
 }
 
 func TestMergeTrimsToMaxRows(t *testing.T) {
-	m := New(nil, time.Minute, 2)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 2})
 	m.width = 100
 	now := time.Now()
 	m.merge([]ghapi.Run{
@@ -207,7 +207,7 @@ func TestMergeTrimsToMaxRows(t *testing.T) {
 
 func TestSelection(t *testing.T) {
 	now := time.Now()
-	m := New(nil, time.Minute, 10)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
 	m.width = 100
 	runs := []ghapi.Run{
 		{ID: 1, Status: "completed", Conclusion: "success", StartedAt: now},
@@ -265,7 +265,7 @@ func TestSelection(t *testing.T) {
 // A clean poll that finds nothing empties the board; a failed one keeps the
 // last good picture rather than blanking it on a blip.
 func TestEmptyResultHandling(t *testing.T) {
-	m := New(nil, time.Minute, 10)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
 	m = step(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{{ID: 1, Status: "queued", StartedAt: time.Now()}}}))
 	if len(m.rows) != 1 {
@@ -290,7 +290,7 @@ func TestEmptyResultHandling(t *testing.T) {
 }
 
 func TestNextPollInBacksOff(t *testing.T) {
-	m := New(nil, 30*time.Second, 10)
+	m := New(nil, Options{Interval: 30 * time.Second, MaxRows: 10})
 	m.now = time.Now()
 	if got := m.nextPollIn(); got != 30*time.Second {
 		t.Errorf("healthy interval = %v, want 30s", got)
@@ -314,10 +314,15 @@ func TestNextPollInBacksOff(t *testing.T) {
 // The frame clock is the board's main cost: a settled board must drop out of
 // animation speed instead of repainting twenty times a second forever.
 func TestNextFrameSlowsWhenSettled(t *testing.T) {
-	m := New(nil, time.Minute, 10)
+	// Pin the clock to a whole second, which is also a whole blink period,
+	// so the next frame is an exact period away rather than whatever the
+	// real clock happens to be a few milliseconds short of.
+	base := time.Unix(1800000000, 0)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
+	m.clock = func() time.Time { return base }
 	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
 	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{
-		{ID: 1, Repo: "acme/web", Status: "completed", Conclusion: "success", StartedAt: time.Now()},
+		{ID: 1, Repo: "acme/web", Status: "completed", Conclusion: "success", StartedAt: base},
 	}}))
 	if got := m.nextFrame(); got != animFrame {
 		t.Fatalf("a moving board schedules %v, want %v", got, animFrame)
@@ -328,25 +333,25 @@ func TestNextFrameSlowsWhenSettled(t *testing.T) {
 			t.Fatal("board never settled")
 		}
 	}
-	if got := m.nextFrame(); got <= animFrame {
-		t.Fatalf("a settled board still schedules %v, want more than %v", got, animFrame)
+	if got := m.nextFrame(); got != idleFrame {
+		t.Fatalf("a settled board schedules %v, want %v", got, idleFrame)
 	}
 
-	// A blinking BOARDING row wakes often enough to blink, but not at
-	// animation speed.
+	// A blinking BOARDING row wakes often enough to blink, but still well
+	// short of animation speed.
 	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{
-		{ID: 2, Repo: "acme/web", Status: "in_progress", StartedAt: time.Now()},
+		{ID: 2, Repo: "acme/web", Status: "in_progress", StartedAt: base},
 	}}))
 	m = frames(m, 500)
-	if got := m.nextFrame(); got > blinkPeriod {
-		t.Fatalf("blinking board schedules %v, want at most %v", got, blinkPeriod)
+	if got := m.nextFrame(); got != blinkPeriod {
+		t.Fatalf("blinking board schedules %v, want %v", got, blinkPeriod)
 	}
 }
 
 // Only one frame clock may run: a tick from a superseded schedule is dropped,
 // and every schedule that supersedes one starts a replacement.
 func TestFrameClockIsSingular(t *testing.T) {
-	m := New(nil, time.Minute, 10)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
 	m = step(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	stale := m.frame - 1
 
@@ -396,7 +401,7 @@ func TestClampRunes(t *testing.T) {
 func TestViewLinesAreExactlyWidth(t *testing.T) {
 	fetch := Demo()
 	for _, w := range []int{60, 80, 110, 200} {
-		m := New(fetch, time.Minute, 6)
+		m := New(fetch, Options{Interval: time.Minute, MaxRows: 6})
 		m = step(m, tea.WindowSizeMsg{Width: w, Height: 24})
 		m = step(m, runsMsg(fetch(t.Context())))
 		m.showHelp = true
@@ -418,7 +423,7 @@ func TestViewFitsHeight(t *testing.T) {
 	fetch := Demo()
 	for _, h := range []int{10, 14, 24, 40} {
 		for _, help := range []bool{false, true} {
-			m := New(fetch, time.Minute, 12)
+			m := New(fetch, Options{Interval: time.Minute, MaxRows: 12})
 			m = step(m, tea.WindowSizeMsg{Width: 110, Height: h})
 			m = step(m, runsMsg(fetch(t.Context())))
 			m.showHelp = help
@@ -432,7 +437,7 @@ func TestViewFitsHeight(t *testing.T) {
 
 // An empty board still fills its panel, so the footer does not jump about.
 func TestViewEmptyBoardKeepsPanelHeight(t *testing.T) {
-	m := New(nil, time.Minute, 5)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 5})
 	m = step(m, tea.WindowSizeMsg{Width: 80, Height: 40})
 	full := strings.Count(m.View(), "\n")
 	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{{ID: 1, Status: "queued", StartedAt: time.Now()}}}))
@@ -516,7 +521,7 @@ func TestLiveRowSettlesAsTimePasses(t *testing.T) {
 	base := time.Now().Truncate(time.Second)
 	var elapsed time.Duration
 
-	m := New(nil, time.Minute, 10)
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
 	m.clock = func() time.Time { return base.Add(elapsed) }
 	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
 	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{{
