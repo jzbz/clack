@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,7 +21,15 @@ const (
 	maxParallel = 4
 	// maxErrBody is how much of a failed response is read for its message.
 	maxErrBody = 4 << 10
+	// repoPageSize is the largest page the repos endpoints will serve.
+	repoPageSize = 100
+	// maxRepoPages bounds a wildcard expansion over a very large owner.
+	maxRepoPages = 10
 )
+
+// errNotFound distinguishes "this owner is not an organisation" from a real
+// failure, so a wildcard can try the user endpoint instead.
+var errNotFound = errors.New("not found")
 
 // Run is one GitHub Actions workflow run, flattened to what the board shows.
 type Run struct {
@@ -166,15 +175,9 @@ func (c *Client) fetchRepo(ctx context.Context, repo string) ([]Run, RateLimit, 
 	// of the payload on a busy repo.
 	url := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=%d&exclude_pull_requests=true",
 		c.base, repo, c.perRepo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := c.newRequest(ctx, url)
 	if err != nil {
 		return nil, rl, fmt.Errorf("%s: %w", repo, err)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "clack")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	if prev.etag != "" {
 		req.Header.Set("If-None-Match", prev.etag)
@@ -220,6 +223,136 @@ func (c *Client) fetchRepo(ctx context.Context, repo string) ([]Run, RateLimit, 
 	}
 	c.cachePut(repo, cacheEntry{etag: resp.Header.Get("ETag"), runs: runs})
 	return runs, rl, nil
+}
+
+// newRequest builds a GET carrying clack's headers and credentials.
+func (c *Client) newRequest(ctx context.Context, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "clack")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	return req, nil
+}
+
+// Repos is the list the client is polling.
+func (c *Client) Repos() []string { return c.repos }
+
+// ExpandWildcards replaces every OWNER/* entry with that owner's
+// repositories, most recently pushed first, keeping at most limit of them.
+//
+// The cap is not politeness, it is arithmetic: the board spends one request
+// per repo per poll, so an owner with two hundred repositories would burn
+// the hourly budget in minutes. Sorting by last push means the cap keeps
+// the repositories somebody is actually working in.
+func (c *Client) ExpandWildcards(ctx context.Context, limit int) error {
+	if limit < 1 {
+		limit = 1
+	}
+	out := make([]string, 0, len(c.repos))
+	seen := make(map[string]bool, len(c.repos))
+	add := func(repo string) {
+		if key := strings.ToLower(repo); !seen[key] {
+			seen[key] = true
+			out = append(out, repo)
+		}
+	}
+	for _, repo := range c.repos {
+		owner, name, _ := strings.Cut(repo, "/")
+		if name != "*" {
+			add(repo)
+			continue
+		}
+		found, err := c.ownerRepos(ctx, owner, limit)
+		if err != nil {
+			return err
+		}
+		if len(found) == 0 {
+			return fmt.Errorf("%s: no repositories to watch", repo)
+		}
+		for _, r := range found {
+			add(r)
+		}
+	}
+	c.repos = out
+	return nil
+}
+
+// ownerRepos lists an owner's repositories. An owner is either an
+// organisation or a user, and only one of those endpoints will answer.
+func (c *Client) ownerRepos(ctx context.Context, owner string, limit int) ([]string, error) {
+	var err error
+	for _, kind := range [...]string{"orgs", "users"} {
+		var repos []string
+		repos, err = c.listRepos(ctx, fmt.Sprintf("%s/%s/%s/repos", c.base, kind, owner), limit)
+		if err == nil {
+			return repos, nil
+		}
+		if !errors.Is(err, errNotFound) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("%s/*: no such organisation or user", owner)
+}
+
+type repoInfo struct {
+	FullName string `json:"full_name"`
+	Archived bool   `json:"archived"`
+}
+
+// listRepos pages through a repos endpoint, newest push first.
+func (c *Client) listRepos(ctx context.Context, endpoint string, limit int) ([]string, error) {
+	var out []string
+	for page := 1; page <= maxRepoPages && len(out) < limit; page++ {
+		url := fmt.Sprintf("%s?sort=pushed&direction=desc&per_page=%d&page=%d",
+			endpoint, repoPageSize, page)
+		req, err := c.newRequest(ctx, url)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		batch, err := decodeRepos(resp)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range batch {
+			// An archived repository cannot produce another run.
+			if r.Archived || r.FullName == "" {
+				continue
+			}
+			if out = append(out, r.FullName); len(out) == limit {
+				return out, nil
+			}
+		}
+		if len(batch) < repoPageSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+func decodeRepos(resp *http.Response) ([]repoInfo, error) {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, errNotFound
+	default:
+		return nil, fmt.Errorf("%s%s", resp.Status, apiMessage(resp.Body))
+	}
+	var batch []repoInfo
+	if err := json.NewDecoder(resp.Body).Decode(&batch); err != nil {
+		return nil, err
+	}
+	return batch, nil
 }
 
 // cacheGet returns the last good response for repo. The runs it carries are

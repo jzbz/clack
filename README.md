@@ -41,6 +41,7 @@ Auth comes from `$GITHUB_TOKEN`, falling back to `gh auth token`.
 
 ```sh
 clack --repo owner/name --repo owner/other          # repeatable, comma-separated
+clack --repo owner/'*'                              # every repo of an owner
 clack --demo                                        # simulated board, no API
 ```
 
@@ -50,6 +51,7 @@ clack --demo                                        # simulated board, no API
 | `--interval` | `30s` (min `10s`)   | poll interval                    |
 | `--rows`     | `12`                | rows shown at once (scroll for more) |
 | `--per-repo` | `5`                 | runs fetched per repo per poll   |
+| `--max-repos`| `20`                | repos an `OWNER/*` wildcard expands to |
 | `--config`   | `~/.config/clack/config.yaml` | config file path       |
 | `--bell`     | `true`              | ring the terminal on a failure   |
 | `--on-fail`  | —                   | shell command to run on a failure |
@@ -67,6 +69,7 @@ repos:
 interval: 20s
 rows: 15
 per_repo: 5
+max_repos: 20
 bell: true
 on_fail: notify-send "CI failed" "$CLACK_REPO $CLACK_WORKFLOW"
 ```
@@ -78,6 +81,23 @@ browser · `r` poll now · `?` help · `esc` clear the filter · `q` quit.
 Unknown keys in the config file are an error rather than a setting that
 silently never applies, and a `--config` path that does not exist is only
 ignored when it is the default one.
+
+## Watching a whole owner
+
+`OWNER/*` expands to that owner's repositories — an organisation or a user,
+whichever exists — resolved once at startup. Quote it, or the shell will
+expand it first:
+
+```sh
+clack --repo 'acme/*'
+```
+
+Archived repositories are left out, since they cannot produce another run,
+and the rest are taken most recently pushed first, up to `--max-repos`.
+That cap is arithmetic rather than politeness: the board spends one request
+per repo per poll, so an owner with two hundred repositories would burn the
+hourly budget in minutes. Sorting by last push means the cap keeps the
+repositories somebody is actually working in.
 
 ## Filtering
 

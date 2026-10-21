@@ -38,8 +38,10 @@ const (
 	defaultInterval  = 30 * time.Second
 	defaultRows      = 12
 	defaultPerRepo   = 5
+	defaultMaxRepos  = 20
 	defaultOnceWidth = 100
 	onceTimeout      = 60 * time.Second
+	expandTimeout    = 30 * time.Second
 )
 
 var (
@@ -72,7 +74,7 @@ func (r *repoFlag) Set(v string) error {
 			continue
 		}
 		if strings.Count(part, "/") != 1 || strings.HasPrefix(part, "/") || strings.HasSuffix(part, "/") {
-			return fmt.Errorf("repo %q: want OWNER/NAME", part)
+			return fmt.Errorf("repo %q: want OWNER/NAME or OWNER/*", part)
 		}
 		*r = append(*r, part)
 	}
@@ -85,6 +87,7 @@ type fileConfig struct {
 	Interval string   `yaml:"interval"`
 	Rows     int      `yaml:"rows"`
 	PerRepo  int      `yaml:"per_repo"`
+	MaxRepos int      `yaml:"max_repos"`
 	Bell     *bool    `yaml:"bell"` // pointer so "unset" differs from false
 	OnFail   string   `yaml:"on_fail"`
 }
@@ -96,6 +99,7 @@ type options struct {
 	interval time.Duration
 	rows     int
 	perRepo  int
+	maxRepos int
 	demo     bool
 	bell     bool
 	onFail   string
@@ -119,6 +123,8 @@ func resolve(args []string) (options, error) {
 	flags.DurationVar(&opt.interval, "interval", 0, "poll interval (default 30s, min 10s)")
 	flags.IntVar(&opt.rows, "rows", 0, "max rows on the board (default 12)")
 	flags.IntVar(&opt.perRepo, "per-repo", 0, "runs fetched per repo (default 5)")
+	flags.IntVar(&opt.maxRepos, "max-repos", 0,
+		"repos an OWNER/* wildcard may expand to (default 20)")
 	flags.BoolVar(&opt.demo, "demo", false, "run on simulated data, no API calls")
 	flags.BoolVar(&opt.bell, "bell", true, "ring the terminal when a run fails")
 	flags.StringVar(&opt.onFail, "on-fail", "", "shell `command` to run when a run fails")
@@ -163,6 +169,9 @@ func resolve(args []string) (options, error) {
 	if !given["per-repo"] {
 		opt.perRepo = fc.PerRepo
 	}
+	if !given["max-repos"] {
+		opt.maxRepos = fc.MaxRepos
+	}
 	if !given["bell"] && fc.Bell != nil {
 		opt.bell = *fc.Bell
 	}
@@ -182,6 +191,9 @@ func resolve(args []string) (options, error) {
 	}
 	if opt.perRepo <= 0 {
 		opt.perRepo = defaultPerRepo
+	}
+	if opt.maxRepos <= 0 {
+		opt.maxRepos = defaultMaxRepos
 	}
 	return opt, nil
 }
@@ -204,7 +216,16 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fetch = ghapi.NewClient(token, opt.repos, opt.perRepo).Fetch
+		client := ghapi.NewClient(token, opt.repos, opt.perRepo)
+		// A wildcard is resolved once, here, so the board never has to
+		// wonder what it is watching.
+		ctx, cancel := context.WithTimeout(context.Background(), expandTimeout)
+		err = client.ExpandWildcards(ctx, opt.maxRepos)
+		cancel()
+		if err != nil {
+			return err
+		}
+		fetch = client.Fetch
 	}
 
 	mode, err := parseFilter(opt.filter)

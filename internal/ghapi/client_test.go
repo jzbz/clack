@@ -177,3 +177,157 @@ func TestFetchHonoursCancellation(t *testing.T) {
 		t.Fatal("a cancelled fetch reported success")
 	}
 }
+
+// repoPage renders a page of the repos endpoint.
+func repoPage(names []string, archived ...string) string {
+	isArchived := map[string]bool{}
+	for _, n := range archived {
+		isArchived[n] = true
+	}
+	var b strings.Builder
+	b.WriteString("[")
+	for i, n := range names {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"full_name":%q,"archived":%v}`, n, isArchived[n])
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+func TestExpandWildcards(t *testing.T) {
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		fmt.Fprint(w, repoPage(
+			[]string{"acme/web", "acme/api", "acme/old", "acme/infra"}, "acme/old"))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, "acme/*", "other/explicit")
+	if err := c.ExpandWildcards(t.Context(), 20); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if gotPath != "/orgs/acme/repos" {
+		t.Errorf("asked for %q, want the org endpoint", gotPath)
+	}
+	// Most recently pushed first, so a cap keeps the live repositories.
+	if !strings.Contains(gotQuery, "sort=pushed") || !strings.Contains(gotQuery, "direction=desc") {
+		t.Errorf("query %q does not sort by last push", gotQuery)
+	}
+	want := []string{"acme/web", "acme/api", "acme/infra", "other/explicit"}
+	if got := c.Repos(); !equalStrings(got, want) {
+		t.Errorf("expanded to %v, want %v (archived dropped, explicit kept)", got, want)
+	}
+}
+
+// The cap exists because the board spends a request per repo per poll.
+func TestExpandWildcardsRespectsLimit(t *testing.T) {
+	names := make([]string, 50)
+	for i := range names {
+		names[i] = fmt.Sprintf("acme/r%02d", i)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, repoPage(names))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, "acme/*")
+	if err := c.ExpandWildcards(t.Context(), 5); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if got := c.Repos(); len(got) != 5 || got[0] != "acme/r00" {
+		t.Errorf("expanded to %d repos (%v), want the first 5", len(got), got)
+	}
+}
+
+// An owner that is a user, not an org, answers on the other endpoint.
+func TestExpandWildcardsFallsBackToUser(t *testing.T) {
+	var tried []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tried = append(tried, r.URL.Path)
+		if strings.HasPrefix(r.URL.Path, "/orgs/") {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"Not Found"}`)
+			return
+		}
+		fmt.Fprint(w, repoPage([]string{"mona/dotfiles"}))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, "mona/*")
+	if err := c.ExpandWildcards(t.Context(), 20); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(tried) != 2 || !strings.HasPrefix(tried[1], "/users/") {
+		t.Errorf("endpoints tried: %v, want orgs then users", tried)
+	}
+	if got := c.Repos(); !equalStrings(got, []string{"mona/dotfiles"}) {
+		t.Errorf("expanded to %v", got)
+	}
+}
+
+func TestExpandWildcardsErrors(t *testing.T) {
+	// Neither an org nor a user.
+	missing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found"}`)
+	}))
+	defer missing.Close()
+	c := newTestClient(t, missing, "ghost/*")
+	if err := c.ExpandWildcards(t.Context(), 20); err == nil {
+		t.Error("an owner that does not exist expanded quietly")
+	}
+
+	// An owner with nothing worth watching is worth saying so about.
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[]`)
+	}))
+	defer empty.Close()
+	c = newTestClient(t, empty, "acme/*")
+	if err := c.ExpandWildcards(t.Context(), 20); err == nil {
+		t.Error("an owner with no repositories expanded quietly")
+	}
+
+	// A real failure is not mistaken for "try the user endpoint".
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"message":"Bad credentials"}`)
+	}))
+	defer broken.Close()
+	c = newTestClient(t, broken, "acme/*")
+	err := c.ExpandWildcards(t.Context(), 20)
+	if err == nil || !strings.Contains(err.Error(), "Bad credentials") {
+		t.Errorf("auth failure reported as %v", err)
+	}
+}
+
+// Without a wildcard nothing is fetched and the list is left alone, except
+// that a repo named twice is only polled once.
+func TestExpandWildcardsLeavesPlainListsAlone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a plain list asked the API for %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, "acme/web", "acme/api", "ACME/WEB")
+	if err := c.ExpandWildcards(t.Context(), 20); err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if got := c.Repos(); !equalStrings(got, []string{"acme/web", "acme/api"}) {
+		t.Errorf("got %v, want the list deduplicated and otherwise untouched", got)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
