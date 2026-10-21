@@ -1,6 +1,7 @@
 package board
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -593,5 +594,50 @@ func TestLiveRowSettlesAsTimePasses(t *testing.T) {
 	}
 	if got := columnText(m.rows[0].fl.String(), cols, colAge); got != "5M" {
 		t.Errorf("AGE after a further 70s = %q, want 5M", got)
+	}
+}
+
+// Which keys may put a browser window on screen, and which may not. Enter
+// used to open one, and enter is what gets pressed when something seems not
+// to have registered — twice it opened a tab somebody did not ask for.
+func TestOnlyOOpensABrowser(t *testing.T) {
+	opens := func(keys ...string) int {
+		t.Helper()
+		m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
+		m.fetch = func(context.Context) ghapi.Result { return ghapi.Result{} }
+		m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
+		m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{{
+			ID: 1, Repo: "acme/web", Workflow: "ci", Status: "completed",
+			Conclusion: "success", StartedAt: time.Now(),
+			URL: "https://github.com/acme/web/actions/runs/1",
+		}}}))
+		n := 0
+		for _, k := range keys {
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+			if k == "enter" {
+				msg = tea.KeyMsg{Type: tea.KeyEnter}
+			}
+			um, cmd := m.Update(msg)
+			m = um.(Model)
+			if cmd != nil {
+				if _, ok := cmd().(browserMsg); ok {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if got := opens("o"); got != 1 {
+		t.Errorf("o opened %d browsers, want 1", got)
+	}
+	for _, keys := range [][]string{
+		{"enter"},
+		{"r", "enter"}, // refresh then a reflexive enter
+		{"x", "enter"}, // the re-run question is up; enter is ignored
+		{"x", "enter", "enter"},
+	} {
+		if got := opens(keys...); got != 0 {
+			t.Errorf("%v opened %d browsers, want 0", keys, got)
+		}
 	}
 }

@@ -356,9 +356,9 @@ func TestRerunNeedsConfirmation(t *testing.T) {
 		t.Fatalf("selID = %d, want the finished run 1", m.selID)
 	}
 
-	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if m.confirm == nil {
-		t.Fatal("shift+R did not ask")
+		t.Fatal("x did not ask")
 	}
 	if len(*asked) != 0 {
 		t.Fatalf("asking already fired the re-run: %v", *asked)
@@ -374,7 +374,7 @@ func TestRerunNeedsConfirmation(t *testing.T) {
 	}
 
 	// Enter is not yes either: this one has to be meant.
-	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	*m = step(*m, tea.KeyMsg{Type: tea.KeyEnter})
 	if len(*asked) != 0 {
 		t.Fatalf("enter fired the re-run: %v", *asked)
@@ -384,7 +384,7 @@ func TestRerunNeedsConfirmation(t *testing.T) {
 func TestRerunOnYes(t *testing.T) {
 	m, asked := rerunBoard(t, nil)
 	m.moveTo(1)
-	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 
 	um, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	*m = um.(Model)
@@ -407,7 +407,7 @@ func TestRerunOnYes(t *testing.T) {
 func TestRerunRefusesLiveRun(t *testing.T) {
 	m, asked := rerunBoard(t, nil)
 	m.moveTo(0) // the in-progress run
-	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if m.confirm != nil {
 		t.Fatal("asked about a run that is still going")
 	}
@@ -426,7 +426,7 @@ func TestRerunUnavailable(t *testing.T) {
 	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{
 		{ID: 1, Repo: "acme/web", Status: "completed", Conclusion: "failure", StartedAt: time.Now()},
 	}}))
-	m = step(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = step(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	if m.confirm != nil {
 		t.Fatal("asked without anything to ask with")
 	}
@@ -462,7 +462,7 @@ func TestRerunPromptIgnoresUnrelatedKeys(t *testing.T) {
 		r.run.URL = "https://github.com/acme/web/actions/runs/1"
 	}
 	m.moveTo(1)
-	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 
 	// Keys that are neither yes nor no leave the question exactly as it was.
 	for _, key := range []tea.KeyMsg{
@@ -509,7 +509,7 @@ func TestRerunPromptEscapeIsNo(t *testing.T) {
 	m.filter.mode = showFailed
 	m.refilter()
 	m.moveTo(0)
-	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	*m = step(*m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.askingRerun() {
 		t.Fatal("esc left the question up")

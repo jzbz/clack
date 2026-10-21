@@ -633,7 +633,7 @@ func (m Model) renderFooter() string {
 	}
 	if m.showHelp {
 		const help = "↑/K ↓/J SELECT · G/SHIFT+G TOP/BOTTOM · F VIEW · / SEARCH · " +
-			"O/ENTER OPEN RUN · SHIFT+R RE-RUN · R REFRESH · ? CLOSE · Q QUIT"
+			"O OPEN RUN · X RE-RUN · R REFRESH · ? CLOSE · Q QUIT"
 		line := clampRunes(help, m.width)
 		b.WriteString(padTo(pt[idDim].render(line), utf8.RuneCountInString(line), m.width))
 		b.WriteByte('\n')
@@ -649,7 +649,7 @@ func (m Model) renderFooter() string {
 	}
 
 	left := m.statusLine()
-	right := "O OPEN · ? HELP · Q QUIT"
+	right := "O OPEN · X RE-RUN · ? HELP · Q QUIT"
 	if m.printed {
 		right = "" // nobody is going to press anything
 	}

@@ -75,9 +75,12 @@ on_fail: notify-send "CI failed" "$CLACK_REPO $CLACK_WORKFLOW"
 ```
 
 Keys: `↑`/`k` `↓`/`j` select · `g`/`G` (or `home`/`end`) top/bottom ·
-`pgup`/`pgdn` page · `f` cycle view · `/` search · `o`/`enter` open run in
-browser · `R` re-run · `r` poll now · `?` help · `esc` clear the filter ·
-`q` quit.
+`pgup`/`pgdn` page · `f` cycle view · `/` search · `o` open run in browser ·
+`x` re-run · `r` poll now · `?` help · `esc` clear the filter · `q` quit.
+
+Only `o` opens a browser window. `enter` does nothing on the board, because
+it is the key people press when something seems not to have registered, and
+that is the worst moment to launch anything.
 
 Unknown keys in the config file are an error rather than a setting that
 silently never applies, and a `--config` path that does not exist is only
@@ -161,7 +164,7 @@ board and comes back.
 
 ## Re-running
 
-`R` (shift) re-runs the selected run. It is the one thing clack writes, so
+`x` re-runs the selected run — a key nowhere near `r`, which refreshes. It is the one thing clack writes, so
 it asks first: the line under the board turns into `RE-RUN ACME/WEB · CI ·
 MAIN?  Y / N`. The question is modal — `y` sends it, `n` or `esc` cancel
 and say so, and every other key is ignored while it is up. In particular

@@ -300,12 +300,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.move(m.panelRows())
 	case "pgup", "ctrl+b":
 		m.move(-m.panelRows())
-	case "o", "enter":
+	case "o":
+		// Only o opens a window. Enter used to as well, and enter is what
+		// people press when a key seems not to have registered — the one
+		// moment an external side effect is least welcome.
 		if r := m.selected(); r != nil && r.run.URL != "" {
 			url := r.run.URL
 			return m, func() tea.Msg { return browserMsg{openURL(url)} }
 		}
-	case "R":
+	case "x":
+		// Re-run is deliberately nowhere near r, which refreshes.
 		m.askRerun()
 	case "?":
 		m.showHelp = !m.showHelp
