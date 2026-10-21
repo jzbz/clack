@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jzbz/clack/internal/board"
 )
 
 func TestRepoFlag(t *testing.T) {
@@ -166,5 +168,64 @@ func TestResolveAlertOptions(t *testing.T) {
 				t.Errorf("onFail = %q, want %q", got.onFail, c.onFail)
 			}
 		})
+	}
+}
+
+func TestParseFilter(t *testing.T) {
+	cases := map[string]board.View{
+		"":       board.ViewAll,
+		"all":    board.ViewAll,
+		"live":   board.ViewLive,
+		"FAILED": board.ViewFailed,
+	}
+	for in, want := range cases {
+		got, err := parseFilter(in)
+		if err != nil {
+			t.Errorf("parseFilter(%q): %v", in, err)
+		}
+		if got != want {
+			t.Errorf("parseFilter(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if _, err := parseFilter("bogus"); err == nil {
+		t.Error("parseFilter accepted a view that does not exist")
+	}
+}
+
+// A bad --filter is caught while resolving, not after the board is up.
+func TestResolveRejectsBadFilter(t *testing.T) {
+	path := writeConfig(t, "repos:\n  - acme/web\n")
+	if _, err := resolve([]string{"-config", path, "-filter", "bogus"}); err == nil {
+		t.Fatal("resolve accepted an unknown view")
+	}
+}
+
+func TestVersionString(t *testing.T) {
+	got := versionString()
+	if !strings.HasPrefix(got, "clack ") {
+		t.Errorf("versionString = %q, want it to start with the program name", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("versionString spans lines: %q", got)
+	}
+}
+
+func TestOnceWidth(t *testing.T) {
+	t.Setenv("COLUMNS", "")
+	if got := onceWidth(); got != defaultOnceWidth {
+		t.Errorf("no COLUMNS: got %d, want %d", got, defaultOnceWidth)
+	}
+	t.Setenv("COLUMNS", "150")
+	if got := onceWidth(); got != 150 {
+		t.Errorf("COLUMNS=150: got %d", got)
+	}
+	// Too narrow to lay a board out on; fall back rather than mangle it.
+	t.Setenv("COLUMNS", "12")
+	if got := onceWidth(); got != defaultOnceWidth {
+		t.Errorf("COLUMNS=12: got %d, want the fallback %d", got, defaultOnceWidth)
+	}
+	t.Setenv("COLUMNS", "wide")
+	if got := onceWidth(); got != defaultOnceWidth {
+		t.Errorf("COLUMNS=wide: got %d, want the fallback %d", got, defaultOnceWidth)
 	}
 }

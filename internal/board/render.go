@@ -42,7 +42,8 @@ const (
 	idClock
 	idBoarding
 	idDeparted
-	idCancelled
+	idFailed
+	idDelayed
 	idError
 	numStyleIDs
 )
@@ -52,16 +53,17 @@ type styleSet [numStyleIDs]lipgloss.Style
 func buildStyles(bg lipgloss.Color) styleSet {
 	base := lipgloss.NewStyle().Background(bg)
 	return styleSet{
-		idBlank:     base,
-		idText:      base.Foreground(textColor),
-		idDim:       base.Foreground(dimColor),
-		idAmber:     base.Foreground(amberColor),
-		idBrand:     base.Foreground(amberColor).Bold(true),
-		idClock:     base.Foreground(textColor).Bold(true),
-		idBoarding:  base.Foreground(amberColor).Bold(true),
-		idDeparted:  base.Foreground(greenColor).Bold(true),
-		idCancelled: base.Foreground(redColor).Bold(true),
-		idError:     base.Foreground(redColor),
+		idBlank:    base,
+		idText:     base.Foreground(textColor),
+		idDim:      base.Foreground(dimColor),
+		idAmber:    base.Foreground(amberColor),
+		idBrand:    base.Foreground(amberColor).Bold(true),
+		idClock:    base.Foreground(textColor).Bold(true),
+		idBoarding: base.Foreground(amberColor).Bold(true),
+		idDeparted: base.Foreground(greenColor).Bold(true),
+		idFailed:   base.Foreground(redColor).Bold(true),
+		idDelayed:  base.Foreground(amberColor).Bold(true),
+		idError:    base.Foreground(redColor),
 	}
 }
 
@@ -132,7 +134,9 @@ const (
 	statusWaiting
 	statusBoarding
 	statusDeparted
+	statusFailed
 	statusCancelled
+	statusDelayed
 	statusSkipped
 	statusHold
 	statusEnded
@@ -144,7 +148,9 @@ var statusWords = [numStatuses]string{
 	statusWaiting:   "WAITING",
 	statusBoarding:  "BOARDING",
 	statusDeparted:  "DEPARTED",
+	statusFailed:    "FAILED",
 	statusCancelled: "CANCELLED",
+	statusDelayed:   "DELAYED",
 	statusSkipped:   "SKIPPED",
 	statusHold:      "HOLD",
 	statusEnded:     "ENDED",
@@ -167,23 +173,43 @@ func statusOf(r ghapi.Run) status {
 	switch r.Conclusion {
 	case "success":
 		return statusDeparted
-	case "skipped":
+	case "cancelled":
+		return statusCancelled // somebody stopped it; not a fault
+	case "timed_out":
+		return statusDelayed
+	case "skipped", "stale":
 		return statusSkipped
 	case "action_required":
 		return statusHold
-	case "":
+	case "neutral", "":
 		return statusEnded
-	default: // failure, cancelled, timed_out, startup_failure
-		return statusCancelled
+	default: // failure, startup_failure, and anything GitHub adds later
+		// An unrecognised ending is treated as a bad one. A false alarm
+		// costs a glance; a failure shown as ENDED costs a lot more.
+		return statusFailed
+	}
+}
+
+// needsAttention reports whether a finished run is one the FAILED view is
+// for: anything that did not simply pass or get skipped.
+func (s status) needsAttention() bool {
+	switch s {
+	case statusFailed, statusCancelled, statusDelayed, statusHold:
+		return true
+	default:
+		return false
 	}
 }
 
 var statusStyle = [numStatuses]styleID{
-	statusQueued:    idDim,
-	statusWaiting:   idDim,
-	statusBoarding:  idBoarding,
-	statusDeparted:  idDeparted,
-	statusCancelled: idCancelled,
+	statusQueued:   idDim,
+	statusWaiting:  idDim,
+	statusBoarding: idBoarding,
+	statusDeparted: idDeparted,
+	statusFailed:   idFailed,
+	// A run somebody cancelled is not a fault, so it does not shout.
+	statusCancelled: idDim,
+	statusDelayed:   idDelayed,
 	statusSkipped:   idDim,
 	statusHold:      idDim,
 	statusEnded:     idDim,
@@ -403,7 +429,11 @@ func rowText(r ghapi.Run, st status, cols []column, now time.Time) string {
 // blinkOn reports whether a blinking status is currently lit. It is driven by
 // the wall clock rather than a frame counter, so the rhythm stays even
 // however often the board repaints.
-func (m Model) blinkOn() bool { return (m.now.UnixNano()/int64(blinkPeriod))%2 == 0 }
+func (m Model) blinkOn() bool {
+	// A printed board is one frame with no next one, so a status caught
+	// mid-blink would simply be missing.
+	return m.printed || (m.now.UnixNano()/int64(blinkPeriod))%2 == 0
+}
 
 // renderRow slices the row's current flap text into styled column segments.
 func (m Model) renderRow(b *strings.Builder, r *row, cols []column, selected bool) {
@@ -441,8 +471,9 @@ func padTo(s string, w, width int) string {
 }
 
 // chromeLines is everything View draws that is not a board row: the header,
-// the column header, the rule, the spacer and the footer's status line.
-const chromeLines = 5
+// the column header, the rule, the spacer, the selection line and the
+// footer's status line.
+const chromeLines = 6
 
 // View renders the whole board.
 func (m Model) View() string {
@@ -490,6 +521,11 @@ func (m Model) View() string {
 	// The spacer is painted too, so the board reads as one solid panel.
 	b.WriteByte('\n')
 	pt[idBlank].write(&b, blanks(m.width))
+	// The selection line belongs to a cursor, which a printed board has not got.
+	if !m.printed {
+		b.WriteByte('\n')
+		b.WriteString(m.renderSelection())
+	}
 	b.WriteByte('\n')
 	b.WriteString(m.renderFooter())
 	return b.String()
@@ -497,6 +533,9 @@ func (m Model) View() string {
 
 // panelRows is how many board rows fit between the header and the footer.
 func (m Model) panelRows() int {
+	if m.printed {
+		return max(min(len(m.shown), m.maxRows), 1) // no blank padding on paper
+	}
 	chrome := chromeLines
 	if m.err != nil {
 		chrome++
@@ -512,6 +551,26 @@ func (m Model) panelRows() int {
 		panel = limit
 	}
 	return max(panel, 1)
+}
+
+// renderSelection spells the highlighted run out in full. The columns
+// truncate hard on a narrow terminal — a branch can read RELEASE/V — so one
+// line always carries the whole of whatever is under the cursor. It is
+// always drawn, even empty, so the board below it never jumps.
+func (m Model) renderSelection() string {
+	r := m.selected()
+	if r == nil {
+		return padTo("", 0, m.width)
+	}
+	parts := make([]string, 0, 5)
+	for _, s := range []string{r.run.Repo, r.run.Workflow, r.run.Branch, r.run.Actor} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	parts = append(parts, r.st.String()+" "+ageText(r.run, m.now))
+	line := clampRunes(strings.ToUpper(strings.Join(parts, " · ")), m.width)
+	return padTo(paints().plain[idText].render(line), utf8.RuneCountInString(line), m.width)
 }
 
 const (
@@ -577,7 +636,10 @@ func (m Model) renderFooter() string {
 	}
 
 	left := m.statusLine()
-	const right = "O OPEN · ? HELP · Q QUIT"
+	right := "O OPEN · ? HELP · Q QUIT"
+	if m.printed {
+		right = "" // nobody is going to press anything
+	}
 	left = clampRunes(left, max(m.width-utf8.RuneCountInString(right)-1, 0))
 	gap := max(m.width-utf8.RuneCountInString(left)-utf8.RuneCountInString(right), 1)
 
@@ -598,7 +660,10 @@ func (m Model) filterLine() string {
 	if m.filter.query != "" {
 		b.WriteString(" /" + strings.ToUpper(m.filter.query))
 	}
-	fmt.Fprintf(&b, " · %d OF %d · ESC CLEAR", len(m.shown), len(m.rows))
+	fmt.Fprintf(&b, " · %d OF %d", len(m.shown), len(m.rows))
+	if !m.printed {
+		b.WriteString(" · ESC CLEAR")
+	}
 	return b.String()
 }
 

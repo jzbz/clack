@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,10 +13,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"gopkg.in/yaml.v3"
 
 	"github.com/jzbz/clack/internal/board"
@@ -30,17 +35,23 @@ Flags:`
 
 // Defaults for anything neither a flag nor the config file sets.
 const (
-	defaultInterval = 30 * time.Second
-	defaultRows     = 12
-	defaultPerRepo  = 5
+	defaultInterval  = 30 * time.Second
+	defaultRows      = 12
+	defaultPerRepo   = 5
+	defaultOnceWidth = 100
+	onceTimeout      = 60 * time.Second
 )
 
-// errUsage means the flags were wrong and usage has already been printed.
-var errUsage = errors.New("usage")
+var (
+	// errUsage means the flags were wrong and usage has already been printed.
+	errUsage = errors.New("usage")
+	// errDone means the work is finished and there is nothing to report.
+	errDone = errors.New("done")
+)
 
 func main() {
 	switch err := run(os.Args[1:]); {
-	case err == nil:
+	case err == nil, errors.Is(err, errDone):
 	case errors.Is(err, errUsage):
 		os.Exit(2)
 	default:
@@ -88,6 +99,9 @@ type options struct {
 	demo     bool
 	bell     bool
 	onFail   string
+	once     bool
+	filter   string
+	search   string
 }
 
 // resolve turns command-line arguments into options. Flags win over the
@@ -96,6 +110,7 @@ func resolve(args []string) (options, error) {
 	var (
 		opt        options
 		repos      repoFlag
+		version    bool
 		configPath = defaultConfigPath()
 	)
 	flags := flag.NewFlagSet("clack", flag.ContinueOnError)
@@ -107,12 +122,20 @@ func resolve(args []string) (options, error) {
 	flags.BoolVar(&opt.demo, "demo", false, "run on simulated data, no API calls")
 	flags.BoolVar(&opt.bell, "bell", true, "ring the terminal when a run fails")
 	flags.StringVar(&opt.onFail, "on-fail", "", "shell `command` to run when a run fails")
+	flags.BoolVar(&opt.once, "once", false, "print one board as plain text and exit")
+	flags.StringVar(&opt.filter, "filter", "", "start in a `view`: all, live or failed")
+	flags.StringVar(&opt.search, "search", "", "start with a search `term`")
+	flags.BoolVar(&version, "version", false, "print the version and exit")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), usage)
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
 		return opt, errUsage // flag has already reported it
+	}
+	if version {
+		fmt.Println(versionString())
+		return opt, errDone
 	}
 	given := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { given[f.Name] = true })
@@ -147,6 +170,9 @@ func resolve(args []string) (options, error) {
 		opt.onFail = fc.OnFail
 	}
 
+	if _, err := parseFilter(opt.filter); err != nil {
+		return opt, err
+	}
 	opt.repos = repos
 	if opt.interval <= 0 {
 		opt.interval = defaultInterval
@@ -181,15 +207,76 @@ func run(args []string) error {
 		fetch = ghapi.NewClient(token, opt.repos, opt.perRepo).Fetch
 	}
 
-	m := board.New(fetch, board.Options{
+	mode, err := parseFilter(opt.filter)
+	if err != nil {
+		return err
+	}
+	bopt := board.Options{
 		Interval: opt.interval,
 		MaxRows:  opt.rows,
 		Bell:     opt.bell,
 		OnFail:   opt.onFail,
-	})
-	p := tea.NewProgram(m, tea.WithAltScreen())
+		View:     mode,
+		Search:   opt.search,
+	}
+
+	if opt.once {
+		ctx, cancel := context.WithTimeout(context.Background(), onceTimeout)
+		defer cancel()
+		// No colour: a printed board is usually going somewhere that
+		// would only show the escapes.
+		lipgloss.SetColorProfile(termenv.Ascii)
+		out, err := board.Once(ctx, fetch, bopt, onceWidth())
+		fmt.Print(out)
+		return err
+	}
+
+	p := tea.NewProgram(board.New(fetch, bopt), tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+// parseFilter turns the --filter name into a view.
+func parseFilter(name string) (board.View, error) {
+	switch strings.ToLower(name) {
+	case "", "all":
+		return board.ViewAll, nil
+	case "live":
+		return board.ViewLive, nil
+	case "failed":
+		return board.ViewFailed, nil
+	default:
+		return board.ViewAll, fmt.Errorf("filter %q: want all, live or failed", name)
+	}
+}
+
+// onceWidth is how wide a printed board should be. There may be no terminal
+// to ask, so COLUMNS gets the final say and 100 is the fallback.
+func onceWidth() int {
+	if n, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && n >= 40 {
+		return n
+	}
+	return defaultOnceWidth
+}
+
+// versionString describes the binary. `go install` records a module
+// version; a local build records only the commit it came from, so fall back
+// to that rather than printing a bare "(devel)".
+func versionString() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "clack (unknown version)"
+	}
+	v := info.Main.Version
+	if v == "" || v == "(devel)" {
+		v = "(devel)"
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && len(s.Value) >= 12 {
+				v = "(devel " + s.Value[:12] + ")"
+			}
+		}
+	}
+	return "clack " + v
 }
 
 // loadConfig reads the optional YAML config. A missing file is only an error

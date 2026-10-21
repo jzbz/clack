@@ -55,12 +55,18 @@ func TestStatusOf(t *testing.T) {
 		{"requested", "", "QUEUED"},
 		{"waiting", "", "WAITING"},
 		{"completed", "success", "DEPARTED"},
-		{"completed", "failure", "CANCELLED"},
+		{"completed", "failure", "FAILED"},
+		{"completed", "startup_failure", "FAILED"},
 		{"completed", "cancelled", "CANCELLED"},
-		{"completed", "timed_out", "CANCELLED"},
+		{"completed", "timed_out", "DELAYED"},
 		{"completed", "skipped", "SKIPPED"},
+		{"completed", "stale", "SKIPPED"},
 		{"completed", "action_required", "HOLD"},
+		{"completed", "neutral", "ENDED"},
 		{"completed", "", "ENDED"},
+		// Something GitHub has not invented yet is assumed to be bad
+		// news: a false alarm is cheaper than a silent failure.
+		{"completed", "something_new", "FAILED"},
 	}
 	for _, c := range cases {
 		got := statusOf(ghapi.Run{Status: c.status, Conclusion: c.concl}).String()
@@ -78,6 +84,11 @@ func TestStatusTablesComplete(t *testing.T) {
 		}
 		if statusStyle[s] == idBlank {
 			t.Errorf("status %q has no style", s)
+		}
+		// The three endings that mean different things must look
+		// different, or splitting them gains nothing.
+		if s == statusFailed && statusStyle[s] == statusStyle[statusCancelled] {
+			t.Error("FAILED and CANCELLED are drawn the same")
 		}
 	}
 }

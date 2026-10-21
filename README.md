@@ -14,16 +14,22 @@ TIME  REPO          WORKFLOW     BRANCH    ACTOR    STATUS     AGE
 20:13 ACME/WEB      CI           MAIN      OCTOCAT  BOARDING   4M
 20:16 ACME/MOBILE   TESTS        FEAT/TABS MONA     QUEUED     38S
 20:03 ACME/INFRA    TERRAFORM    MAIN      OCTOCAT  DEPARTED   7M04S
-19:51 ACME/WEB      LINT         FIX/CSS   MONA     CANCELLED  1M38S
+19:51 ACME/WEB      LINT         FIX/CSS   MONA     FAILED     1M38S
 ```
 
-Status vocabulary: in progress → `BOARDING` (blinks), success → `DEPARTED`,
-failure/cancelled/timed out → `CANCELLED`, queued → `QUEUED`, waiting →
-`WAITING`, skipped → `SKIPPED`, action required → `HOLD`, finished with no
-conclusion → `ENDED`. `AGE` is how long a live run has been going, or
-exactly how long a finished one took. A live age is rounded to the minute
-once past one: a flap cell takes about a second to turn, so a running
-seconds counter would never settle.
+Status vocabulary: in progress → `BOARDING` (blinks), queued → `QUEUED`,
+waiting → `WAITING`, success → `DEPARTED`, failure → `FAILED`, cancelled →
+`CANCELLED`, timed out → `DELAYED`, skipped or stale → `SKIPPED`, action
+required → `HOLD`, neutral or no conclusion → `ENDED`. The three bad
+endings are told apart on purpose: a run that failed, a run somebody
+stopped and a run that ran out of time are different news, and only
+`FAILED` and `DELAYED` are painted red.
+
+`AGE` is how long a live run has been going, or exactly how long a finished
+one took. A live age is rounded to the minute once past one: a flap cell
+takes about a second to turn, so a running seconds counter would never
+settle. The line under the board spells the selected run out in full, since
+the columns truncate hard on a narrow terminal.
 
 The board sizes itself to the terminal: the workflow column takes up the
 slack, and on a narrow one the actor, branch and time columns drop off
@@ -47,6 +53,10 @@ clack --demo                                        # simulated board, no API
 | `--config`   | `~/.config/clack/config.yaml` | config file path       |
 | `--bell`     | `true`              | ring the terminal on a failure   |
 | `--on-fail`  | —                   | shell command to run on a failure |
+| `--filter`   | `all`               | start in a view: `all`, `live`, `failed` |
+| `--search`   | —                   | start with a search term         |
+| `--once`     | —                   | print one board as plain text and exit |
+| `--version`  | —                   | print the version and exit       |
 
 Config file (all keys optional; flags win):
 
@@ -73,7 +83,7 @@ ignored when it is the default one.
 
 Past a couple of repos the board fills with green you are not looking for.
 `f` cycles between **ALL**, **LIVE** (anything still running or queued) and
-**FAILED** (anything red or holding). `/` searches repo, workflow, branch
+**FAILED** (failed, cancelled, delayed or holding). `/` searches repo, workflow, branch
 and actor, case-insensitively, as you type; `enter` keeps it, `esc` puts
 back what was there before. `esc` on a filtered board clears the filter
 rather than quitting, so backing out of a search cannot kill the board.
@@ -85,6 +95,22 @@ want to see when they ask the board what went wrong.
 Filtering is a view over what has already been fetched, so it costs no API
 calls. `--rows` caps what is on screen, not what is kept: the selection
 scrolls the board, and the footer says which rows you are looking at.
+
+`--filter` and `--search` start the board in a view, which is also how they
+pair with `--once`.
+
+## One-shot output
+
+`--once` polls once, prints a settled board as plain text and exits — for a
+cron job, a status line, or a scrollback you want to keep:
+
+```sh
+clack --repo acme/web --once --filter failed
+```
+
+Nothing animates and nothing blinks, so no status can be caught mid-flap;
+the key hints are left off; and the board is as tall as its contents. Width
+comes from `$COLUMNS`, falling back to 100.
 
 ## Alerts
 
@@ -103,9 +129,11 @@ turn into shell: `CLACK_REPO`, `CLACK_WORKFLOW`, `CLACK_BRANCH`,
 `CLACK_RUN_ID`. Its output is discarded, it is given 30 seconds, and a
 non-zero exit shows up in the footer.
 
-What counts as worth interrupting you: `failure`, `timed_out` and
-`startup_failure`. A run somebody cancelled on purpose, or one that was
-skipped, appears on the board but stays quiet. The first poll never alerts —
+What counts as worth interrupting you is exactly what the board paints red:
+`FAILED` and `DELAYED`. A run somebody cancelled on purpose, or one that
+was skipped, appears on the board but stays quiet. An ending GitHub has not
+invented yet counts as a failure, on the grounds that a false alarm is
+cheaper than a failure shown as `ENDED`. The first poll never alerts —
 it is seeding the board from history, and everything red on it has already
 happened. Each run is reported once, even if it drops off the bottom of the
 board and comes back.

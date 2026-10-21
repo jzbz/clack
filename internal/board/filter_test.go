@@ -311,3 +311,36 @@ func TestFilterLineAndPosition(t *testing.T) {
 		}
 	}
 }
+
+// The three ways a run can end badly are told apart, and the FAILED view
+// collects all of them while the bell is choosier.
+func TestStatusSplitFeedsFilterAndAlert(t *testing.T) {
+	cases := []struct {
+		concl    string
+		word     string
+		inFailed bool
+		rings    bool
+	}{
+		{"failure", "FAILED", true, true},
+		{"startup_failure", "FAILED", true, true},
+		{"timed_out", "DELAYED", true, true},
+		{"cancelled", "CANCELLED", true, false},
+		{"action_required", "HOLD", true, false},
+		{"success", "DEPARTED", false, false},
+		{"skipped", "SKIPPED", false, false},
+	}
+	f := filter{mode: showFailed}
+	for _, c := range cases {
+		r := ghapi.Run{ID: 1, Repo: "acme/web", Status: "completed", Conclusion: c.concl}
+		st := statusOf(r)
+		if st.String() != c.word {
+			t.Errorf("%s shows %q, want %q", c.concl, st, c.word)
+		}
+		if got := f.match(r, st); got != c.inFailed {
+			t.Errorf("%s in FAILED view = %v, want %v", c.concl, got, c.inFailed)
+		}
+		if got := isFailure(r); got != c.rings {
+			t.Errorf("%s rings = %v, want %v", c.concl, got, c.rings)
+		}
+	}
+}

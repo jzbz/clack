@@ -124,6 +124,13 @@ func (f *flap) step() {
 	}
 }
 
+// snap puts every cell straight onto its target, for a board that is
+// printed once rather than animated.
+func (f *flap) snap() {
+	copy(f.cur, f.dst)
+	f.moving = 0
+}
+
 // settled reports whether every cell shows its target.
 func (f *flap) settled() bool { return f.moving == 0 }
 

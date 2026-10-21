@@ -61,6 +61,11 @@ type Model struct {
 	// notify delivers failures. nil when the user wants no alerts, and
 	// replaced in tests so they neither ring nor spawn anything.
 	notify notifier
+
+	// printed marks a board rendered once to be read as text rather than
+	// driven: nothing blinks, the panel is as tall as its contents, and
+	// the keyboard hints are left off.
+	printed bool
 }
 
 func (m Model) timeNow() time.Time {
@@ -84,11 +89,13 @@ type Options struct {
 	MaxRows  int           // most runs to keep on the board
 	Bell     bool          // ring the terminal when a run fails
 	OnFail   string        // shell command to run when a run fails
+	View     View          // view to start in
+	Search   string        // search to start with
 }
 
 // New builds a Model polling with fetch.
 func New(fetch Fetcher, opt Options) Model {
-	return Model{
+	m := Model{
 		fetch:    fetch,
 		interval: max(opt.Interval, minInterval),
 		maxRows:  max(opt.MaxRows, 1),
@@ -98,6 +105,9 @@ func New(fetch Fetcher, opt Options) Model {
 		now:      time.Now(),
 		notify:   newNotifier(opt.Bell, opt.OnFail),
 	}
+	m.filter.mode = filterMode(opt.View)
+	m.filter.setQuery(opt.Search)
+	return m
 }
 
 type (

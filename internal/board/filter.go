@@ -6,6 +6,17 @@ import (
 	"github.com/jzbz/clack/internal/ghapi"
 )
 
+// View names a preset the board can start in. It is the exported face of
+// filterMode, so a caller can ask for a view without the filter internals.
+type View = filterMode
+
+// The views --filter accepts.
+const (
+	ViewAll    = showAll
+	ViewLive   = showLive
+	ViewFailed = showFailed
+)
+
 // filterMode is the preset view the board is showing.
 type filterMode int
 
@@ -57,7 +68,7 @@ func (f filter) match(r ghapi.Run, st status) bool {
 			return false
 		}
 	case showFailed:
-		if st != statusCancelled && st != statusHold {
+		if !st.needsAttention() {
 			return false
 		}
 	}

@@ -20,11 +20,8 @@ const hookTimeout = 30 * time.Second
 // someone for. A run somebody cancelled on purpose, or one that was skipped,
 // is not news; the board shows those but stays quiet about them.
 func isFailure(r ghapi.Run) bool {
-	if r.Status != "completed" {
-		return false
-	}
-	switch r.Conclusion {
-	case "failure", "timed_out", "startup_failure":
+	switch statusOf(r) {
+	case statusFailed, statusDelayed:
 		return true
 	default:
 		return false
