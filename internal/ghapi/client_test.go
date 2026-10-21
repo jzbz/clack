@@ -331,3 +331,42 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+func TestRerun(t *testing.T) {
+	var method, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	if err := newTestClient(t, srv, "acme/web").Rerun(t.Context(), "acme/web", 42); err != nil {
+		t.Fatalf("Rerun: %v", err)
+	}
+	if method != http.MethodPost {
+		t.Errorf("method = %s, want POST", method)
+	}
+	if want := "/repos/acme/web/actions/runs/42/rerun"; path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
+
+// A token from `gh auth token` may not be allowed to write, so the refusal
+// has to say what is missing rather than just "403".
+func TestRerunReportsMissingScope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"Resource not accessible by personal access token"}`)
+	}))
+	defer srv.Close()
+
+	err := newTestClient(t, srv, "acme/web").Rerun(t.Context(), "acme/web", 42)
+	if err == nil {
+		t.Fatal("a forbidden re-run reported success")
+	}
+	for _, want := range []string{"acme/web", "403", "actions:write"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

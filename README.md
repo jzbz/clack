@@ -76,7 +76,8 @@ on_fail: notify-send "CI failed" "$CLACK_REPO $CLACK_WORKFLOW"
 
 Keys: `↑`/`k` `↓`/`j` select · `g`/`G` (or `home`/`end`) top/bottom ·
 `pgup`/`pgdn` page · `f` cycle view · `/` search · `o`/`enter` open run in
-browser · `r` poll now · `?` help · `esc` clear the filter · `q` quit.
+browser · `R` re-run · `r` poll now · `?` help · `esc` clear the filter ·
+`q` quit.
 
 Unknown keys in the config file are an error rather than a setting that
 silently never applies, and a `--config` path that does not exist is only
@@ -157,6 +158,22 @@ cheaper than a failure shown as `ENDED`. The first poll never alerts —
 it is seeding the board from history, and everything red on it has already
 happened. Each run is reported once, even if it drops off the bottom of the
 board and comes back.
+
+## Re-running
+
+`R` (shift) re-runs the selected run. It is the one thing clack writes, so
+it asks first: the line under the board turns into `RE-RUN ACME/WEB · CI ·
+MAIN?  Y / N`, and only `y` sends it. Any other key is no — including
+`enter`, which is too easy to hit by accident.
+
+Only a finished run can be re-run; pressing `R` on one that is still going
+says so instead. The run keeps its ID and goes back to queued, so it flaps
+back to `QUEUED` on the row it already occupies rather than appearing
+twice.
+
+This needs a token allowed to write: the `repo` scope, or `actions:write`.
+A token from `gh auth token` may not have it, and a refusal says so rather
+than just reporting `403`.
 
 ## Rate limits
 

@@ -1,7 +1,9 @@
 package board
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -321,5 +323,131 @@ func TestNotifierRunsHookPerRun(t *testing.T) {
 	}
 	if got, want := string(b), "acme/web\nacme/api\n"; got != want {
 		t.Errorf("hook fired %q, want %q", got, want)
+	}
+}
+
+// rerunBoard returns a board with one finished and one live run, recording
+// re-run requests instead of making them.
+func rerunBoard(t *testing.T, err error) (*Model, *[]string) {
+	t.Helper()
+	var asked []string
+	m := New(nil, Options{
+		Interval: time.Minute, MaxRows: 10,
+		Rerun: func(_ context.Context, repo string, id int64) error {
+			asked = append(asked, fmt.Sprintf("%s#%d", repo, id))
+			return err
+		},
+	})
+	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
+	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{
+		{ID: 1, Repo: "acme/web", Workflow: "ci", Branch: "main",
+			Status: "completed", Conclusion: "failure", StartedAt: time.Now()},
+		{ID: 2, Repo: "acme/api", Workflow: "deploy", Branch: "main",
+			Status: "in_progress", StartedAt: time.Now().Add(-time.Minute)},
+	}}))
+	return &m, &asked
+}
+
+// Nothing is sent until the question is answered yes.
+func TestRerunNeedsConfirmation(t *testing.T) {
+	m, asked := rerunBoard(t, nil)
+	m.moveTo(1) // the finished run; the live one sorts first
+	if m.selID != 1 {
+		t.Fatalf("selID = %d, want the finished run 1", m.selID)
+	}
+
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if m.confirm == nil {
+		t.Fatal("shift+R did not ask")
+	}
+	if len(*asked) != 0 {
+		t.Fatalf("asking already fired the re-run: %v", *asked)
+	}
+	if got := stripANSI(m.renderSelection()); !strings.Contains(got, "RE-RUN ACME/WEB") {
+		t.Errorf("the question is not on screen: %q", got)
+	}
+
+	// Any other key is no.
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.confirm != nil || len(*asked) != 0 {
+		t.Fatalf("n fired the re-run: confirm=%v asked=%v", m.confirm, *asked)
+	}
+
+	// Enter is not yes either: this one has to be meant.
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(*asked) != 0 {
+		t.Fatalf("enter fired the re-run: %v", *asked)
+	}
+}
+
+func TestRerunOnYes(t *testing.T) {
+	m, asked := rerunBoard(t, nil)
+	m.moveTo(1)
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+
+	um, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	*m = um.(Model)
+	if cmd == nil {
+		t.Fatal("y did not send anything")
+	}
+	msg := cmd()
+	if _, ok := msg.(rerunMsg); !ok {
+		t.Fatalf("got %T, want a rerunMsg", msg)
+	}
+	if len(*asked) != 1 || (*asked)[0] != "acme/web#1" {
+		t.Fatalf("re-ran %v, want acme/web#1", *asked)
+	}
+	if m.confirm != nil {
+		t.Error("the question is still up after answering")
+	}
+}
+
+// A run still going cannot be re-run, and saying so beats a 403 later.
+func TestRerunRefusesLiveRun(t *testing.T) {
+	m, asked := rerunBoard(t, nil)
+	m.moveTo(0) // the in-progress run
+	*m = step(*m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if m.confirm != nil {
+		t.Fatal("asked about a run that is still going")
+	}
+	if m.err == nil || !strings.Contains(m.err.Error(), "finished") {
+		t.Errorf("err = %v, want it to explain why not", m.err)
+	}
+	if len(*asked) != 0 {
+		t.Fatalf("re-ran a live run: %v", *asked)
+	}
+}
+
+// With no token there is nothing to re-run with; say so rather than ask.
+func TestRerunUnavailable(t *testing.T) {
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
+	m = step(m, tea.WindowSizeMsg{Width: 110, Height: 30})
+	m = step(m, runsMsg(ghapi.Result{Runs: []ghapi.Run{
+		{ID: 1, Repo: "acme/web", Status: "completed", Conclusion: "failure", StartedAt: time.Now()},
+	}}))
+	m = step(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	if m.confirm != nil {
+		t.Fatal("asked without anything to ask with")
+	}
+	if m.err == nil {
+		t.Error("no explanation given")
+	}
+}
+
+// A refusal from GitHub belongs in the footer, and a success schedules the
+// poll that will show the run boarding again.
+func TestRerunResultHandling(t *testing.T) {
+	m := New(nil, Options{Interval: time.Minute, MaxRows: 10})
+	m = step(m, rerunMsg{errors.New("re-run acme/web: 403 Forbidden")})
+	if m.err == nil || !strings.Contains(m.err.Error(), "403") {
+		t.Errorf("refusal not surfaced: %v", m.err)
+	}
+	um, cmd := m.Update(rerunMsg{})
+	if um.(Model).err != nil {
+		t.Errorf("a successful re-run left an error: %v", um.(Model).err)
+	}
+	if cmd == nil {
+		t.Error("a successful re-run did not schedule a poll")
 	}
 }

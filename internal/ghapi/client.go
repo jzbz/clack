@@ -175,7 +175,7 @@ func (c *Client) fetchRepo(ctx context.Context, repo string) ([]Run, RateLimit, 
 	// of the payload on a busy repo.
 	url := fmt.Sprintf("%s/repos/%s/actions/runs?per_page=%d&exclude_pull_requests=true",
 		c.base, repo, c.perRepo)
-	req, err := c.newRequest(ctx, url)
+	req, err := c.newRequest(ctx, http.MethodGet, url)
 	if err != nil {
 		return nil, rl, fmt.Errorf("%s: %w", repo, err)
 	}
@@ -225,9 +225,9 @@ func (c *Client) fetchRepo(ctx context.Context, repo string) ([]Run, RateLimit, 
 	return runs, rl, nil
 }
 
-// newRequest builds a GET carrying clack's headers and credentials.
-func (c *Client) newRequest(ctx context.Context, url string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// newRequest builds a request carrying clack's headers and credentials.
+func (c *Client) newRequest(ctx context.Context, method, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +238,35 @@ func (c *Client) newRequest(ctx context.Context, url string) (*http.Request, err
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return req, nil
+}
+
+// Rerun asks GitHub to run a completed workflow run again. The run keeps
+// its ID and goes back to queued, so the board shows the change on its next
+// poll rather than growing a second row.
+//
+// This is the only thing clack writes, and a token from `gh auth token`
+// may well not be allowed to, so a refusal says what is missing.
+func (c *Client) Rerun(ctx context.Context, repo string, runID int64) error {
+	url := fmt.Sprintf("%s/repos/%s/actions/runs/%d/rerun", c.base, repo, runID)
+	req, err := c.newRequest(ctx, http.MethodPost, url)
+	if err != nil {
+		return err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("re-run %s: %w", repo, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusCreated, http.StatusOK:
+		return nil
+	case http.StatusForbidden, http.StatusUnauthorized:
+		return fmt.Errorf("re-run %s: %s%s (the token needs the actions:write scope)",
+			repo, resp.Status, apiMessage(resp.Body))
+	default:
+		return fmt.Errorf("re-run %s: %s%s", repo, resp.Status, apiMessage(resp.Body))
+	}
 }
 
 // Repos is the list the client is polling.
@@ -311,7 +340,7 @@ func (c *Client) listRepos(ctx context.Context, endpoint string, limit int) ([]s
 	for page := 1; page <= maxRepoPages && len(out) < limit; page++ {
 		url := fmt.Sprintf("%s?sort=pushed&direction=desc&per_page=%d&page=%d",
 			endpoint, repoPageSize, page)
-		req, err := c.newRequest(ctx, url)
+		req, err := c.newRequest(ctx, http.MethodGet, url)
 		if err != nil {
 			return nil, err
 		}

@@ -558,6 +558,14 @@ func (m Model) panelRows() int {
 // line always carries the whole of whatever is under the cursor. It is
 // always drawn, even empty, so the board below it never jumps.
 func (m Model) renderSelection() string {
+	// While a re-run is waiting on an answer, the line describing the run
+	// becomes the question about it.
+	if c := m.confirm; c != nil {
+		line := clampRunes(strings.ToUpper(fmt.Sprintf(
+			"RE-RUN %s · %s · %s?   Y / N", c.run.Repo, c.run.Workflow, c.run.Branch)), m.width)
+		return padTo(paints().plain[idBoarding].render(line),
+			utf8.RuneCountInString(line), m.width)
+	}
 	r := m.selected()
 	if r == nil {
 		return padTo("", 0, m.width)
@@ -620,7 +628,7 @@ func (m Model) renderFooter() string {
 	}
 	if m.showHelp {
 		const help = "↑/K ↓/J SELECT · G/SHIFT+G TOP/BOTTOM · F VIEW · / SEARCH · " +
-			"O/ENTER OPEN RUN · R REFRESH · ? CLOSE · Q QUIT"
+			"O/ENTER OPEN RUN · SHIFT+R RE-RUN · R REFRESH · ? CLOSE · Q QUIT"
 		line := clampRunes(help, m.width)
 		b.WriteString(padTo(pt[idDim].render(line), utf8.RuneCountInString(line), m.width))
 		b.WriteByte('\n')

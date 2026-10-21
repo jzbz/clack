@@ -4,6 +4,8 @@ package board
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -22,6 +24,10 @@ const (
 	minInterval  = 10 * time.Second
 	maxBackoff   = 5 * time.Minute
 	fetchTimeout = 30 * time.Second
+	rerunTimeout = 30 * time.Second
+	// rerunSettle is how long GitHub is given to queue the run before the
+	// board looks for it.
+	rerunSettle = 3 * time.Second
 )
 
 // Model is the bubbletea model for the board.
@@ -62,6 +68,9 @@ type Model struct {
 	// replaced in tests so they neither ring nor spawn anything.
 	notify notifier
 
+	rerun   Rerunner
+	confirm *row // the run a re-run is waiting to be confirmed for
+
 	// printed marks a board rendered once to be read as text rather than
 	// driven: nothing blinks, the panel is as tall as its contents, and
 	// the keyboard hints are left off.
@@ -91,7 +100,11 @@ type Options struct {
 	OnFail   string        // shell command to run when a run fails
 	View     View          // view to start in
 	Search   string        // search to start with
+	Rerun    Rerunner      // asks GitHub to run a run again; nil disables it
 }
+
+// Rerunner asks GitHub to run a completed run again.
+type Rerunner func(ctx context.Context, repo string, runID int64) error
 
 // New builds a Model polling with fetch.
 func New(fetch Fetcher, opt Options) Model {
@@ -104,6 +117,7 @@ func New(fetch Fetcher, opt Options) Model {
 		rl:       ghapi.RateLimit{Remaining: -1},
 		now:      time.Now(),
 		notify:   newNotifier(opt.Bell, opt.OnFail),
+		rerun:    opt.Rerun,
 	}
 	m.filter.mode = filterMode(opt.View)
 	m.filter.setQuery(opt.Search)
@@ -116,6 +130,7 @@ type (
 	runsMsg    ghapi.Result
 	browserMsg struct{ err error }
 	alertMsg   struct{ err error }
+	rerunMsg   struct{ err error }
 )
 
 // Init starts the first poll and the frame clock.
@@ -176,10 +191,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
-		if m.typing {
+		switch {
+		case m.typing:
 			return m.handleQueryKey(msg)
+		case m.confirm != nil:
+			return m.handleConfirmKey(msg)
+		default:
+			return m.handleKey(msg)
 		}
-		return m.handleKey(msg)
 
 	case browserMsg:
 		if msg.err != nil {
@@ -190,6 +209,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 		}
+
+	case rerunMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			break
+		}
+		m.err = nil
+		// The run keeps its ID and goes back to queued, so a poll shortly
+		// after shows it boarding again on the row it already occupies.
+		return m, tea.Tick(rerunSettle, func(time.Time) tea.Msg { return pollMsg{} })
 
 	case pollMsg:
 		if !m.polling {
@@ -274,6 +303,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			url := r.run.URL
 			return m, func() tea.Msg { return browserMsg{openBrowser(url)} }
 		}
+	case "R":
+		m.askRerun()
 	case "?":
 		m.showHelp = !m.showHelp
 	case "r":
@@ -283,6 +314,39 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// askRerun puts the question up, if there is something sensible to ask
+// about. Nothing is sent until the answer comes back.
+func (m *Model) askRerun() {
+	r := m.selected()
+	switch {
+	case r == nil:
+		return
+	case m.rerun == nil:
+		m.err = errors.New("re-running needs a GitHub token; not available here")
+	case r.run.Status != "completed":
+		m.err = fmt.Errorf("%s is still %s; only a finished run can be re-run",
+			r.run.Workflow, r.st)
+	default:
+		m.err = nil
+		m.confirm = r
+	}
+}
+
+// handleConfirmKey answers the re-run question. Only yes means yes.
+func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	r := m.confirm
+	m.confirm = nil
+	if msg.String() != "y" && msg.String() != "Y" {
+		return m, nil
+	}
+	rerun, repo, id := m.rerun, r.run.Repo, r.id
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), rerunTimeout)
+		defer cancel()
+		return rerunMsg{rerun(ctx, repo, id)}
+	}
 }
 
 // handleQueryKey edits the search while the query line has the keyboard.

@@ -204,7 +204,10 @@ func run(args []string) error {
 		return err
 	}
 
-	var fetch board.Fetcher
+	var (
+		fetch board.Fetcher
+		rerun board.Rerunner // nil in demo mode: there is nothing to re-run
+	)
 	switch {
 	case opt.demo:
 		fetch = board.Demo()
@@ -226,6 +229,7 @@ func run(args []string) error {
 			return err
 		}
 		fetch = client.Fetch
+		rerun = client.Rerun
 	}
 
 	mode, err := parseFilter(opt.filter)
@@ -239,6 +243,7 @@ func run(args []string) error {
 		OnFail:   opt.onFail,
 		View:     mode,
 		Search:   opt.search,
+		Rerun:    rerun,
 	}
 
 	if opt.once {
