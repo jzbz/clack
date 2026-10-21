@@ -137,7 +137,7 @@ func TestRunRejectsBadConfigRepo(t *testing.T) {
 // The bell is on unless something turns it off, and "off" in the config
 // file has to be distinguishable from "not mentioned".
 func TestResolveAlertOptions(t *testing.T) {
-	plain := writeConfig(t, "repos:\n  - acme/web\n")
+	const plain = "repos:\n  - acme/web\n"
 	cases := []struct {
 		name   string
 		config string
@@ -155,11 +155,7 @@ func TestResolveAlertOptions(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			path := c.config
-			if !strings.HasPrefix(path, "/") {
-				path = writeConfig(t, c.config)
-			}
-			got, err := resolve(append([]string{"-config", path}, c.args...))
+			got, err := resolve(append([]string{"-config", writeConfig(t, c.config)}, c.args...))
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
 			}

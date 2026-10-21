@@ -129,6 +129,13 @@ about once a second instead of twenty times.
 
 ## Develop
 
+[![ci](https://github.com/jzbz/clack/actions/workflows/ci.yml/badge.svg)](https://github.com/jzbz/clack/actions/workflows/ci.yml)
+
+Tests, vet and gofmt run on push across Linux, macOS and Windows, because
+clack shells out differently on each: `xdg-open`/`open`/`rundll32` to show a
+run, and `sh`/`cmd` to run an `--on-fail` hook.
+
+
 ```sh
 go test ./...                             # unit tests
 go test ./internal/board/ -bench .        # frame and merge costs
